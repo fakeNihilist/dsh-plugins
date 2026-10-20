@@ -46,14 +46,24 @@ for (const name of packages) {
 
   const shown = files.map((file) => relative(cwd, file).replaceAll('\\', '/'));
   console.log(`\n=== ${name}: ${shown.length} test file(s) ===`);
-  for (const file of shown) console.log(`  - ${file}`);
 
-  const result = spawnSync(
-    process.execPath,
-    ['--test', ...extraFlags, ...shown],
-    { cwd, stdio: 'inherit' },
-  );
-  if (result.status !== 0) failures.push({ name, status: result.status, signal: result.signal });
+  // One process per file: several packages rely on per-file module isolation
+  // (module-level caches), and `NODE_TEST_FLAGS=--experimental-test-isolation=none`
+  // then still keeps files apart.
+  let packageFailed = 0;
+  for (const file of shown) {
+    console.log(`\n--- ${name}: ${file} ---`);
+    const result = spawnSync(
+      process.execPath,
+      ['--test', ...extraFlags, file],
+      { cwd, stdio: 'inherit' },
+    );
+    if (result.status !== 0) {
+      packageFailed += 1;
+      failures.push({ name, file, status: result.status, signal: result.signal });
+    }
+  }
+  console.log(`\n=== ${name}: ${packageFailed === 0 ? 'passed' : `${packageFailed} failed file(s)`} ===`);
 }
 
 console.log('\n=== summary ===');
@@ -61,7 +71,11 @@ if (failures.length === 0) {
   console.log('all packages passed');
 } else {
   for (const failure of failures) {
-    console.log(`FAILED ${failure.name} (exit ${failure.status}${failure.signal ? `, signal ${failure.signal}` : ''})`);
+    console.log(
+      `FAILED ${failure.name} / ${failure.file}` +
+      ` (exit ${failure.status}${failure.signal ? `, signal ${failure.signal}` : ''})`,
+    );
   }
 }
 process.exit(failures.length === 0 ? 0 : 1);
+
