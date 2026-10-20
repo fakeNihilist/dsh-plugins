@@ -1,0 +1,33 @@
+{
+  "name": "dsh-plugins",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A collection of plugins for DeepSeek Harness (DSH): Playwright browser tools, in-session chat search, and whole-corpus token usage statistics.",
+  "license": "MIT",
+  "author": "fakeNihilist (https://github.com/fakeNihilist)",
+  "homepage": "https://github.com/fakeNihilist/dsh-plugins#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fakeNihilist/dsh-plugins.git"
+  },
+  "bugs": {
+    "url": "https://github.com/fakeNihilist/dsh-plugins/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek",
+    "plugins"
+  ],
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "node scripts/test-all.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
