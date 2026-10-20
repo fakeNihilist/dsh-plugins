@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Chat search">
+  <g fill="none" stroke="#4D6BFE" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="10.5" cy="10.5" r="6.5" opacity="0.9" />
+    <line x1="15.4" y1="15.4" x2="20.5" y2="20.5" />
+  </g>
+  <g fill="#4D6BFE" opacity="0.55">
+    <rect x="5" y="8.2" width="11" height="1.6" rx="0.8" />
+    <rect x="5" y="11.2" width="7" height="1.6" rx="0.8" />
+  </g>
+</svg>

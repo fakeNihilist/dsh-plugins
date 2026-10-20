@@ -1,0 +1,12 @@
+{
+  "open": "Search in this conversation",
+  "placeholder": "Search this conversation",
+  "close": "Close search",
+  "prev": "Previous match",
+  "next": "Next match",
+  "caseSensitive": "Match case",
+  "regex": "Regular expression",
+  "noResults": "No matches",
+  "invalidPattern": "Invalid pattern",
+  "results": "Match {active} of {total}"
+}

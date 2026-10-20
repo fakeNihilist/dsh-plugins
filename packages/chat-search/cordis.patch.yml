@@ -1,0 +1,3 @@
+- insert:
+    - id: chat-search
+      name: 'dsh-plugin-chat-search'
