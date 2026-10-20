@@ -24,6 +24,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { zstdCompressSync } from 'node:zlib';
 
+// Redirects the Host half's checkpoint into a throwaway directory. Imported for its
+// side effect and before anything activates the plugin.
+import './support/isolated-state.js';
+
 import { DATA_PATH, apply, reasonOf } from '../index.js';
 import { totalOf } from '../usage-fold.js';
 

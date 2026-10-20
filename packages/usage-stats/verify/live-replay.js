@@ -9,13 +9,26 @@
  *
  * Run: node verify/live-replay.js [YYYY-MM-DD] [cutoff HH:MM]
  */
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { zstdDecompressSync } from 'node:zlib';
 
 import { DATA_PATH, apply, inheritedCut } from '../index.js';
 import { localDayKey, totalOf } from '../usage-fold.js';
+
+/**
+ * Replay into a throwaway checkpoint directory.
+ *
+ * A replay folds the whole corpus from scratch, so it must neither consume nor
+ * clobber the checkpoint a real host is using — and a checkpoint left behind by this
+ * script would be adopted by the next real start.
+ */
+const STATE_DIR = join(tmpdir(), `usage-stats-replay-${process.pid}`);
+process.env.DSH_USAGE_STATS_STATE = STATE_DIR;
+process.on('exit', () => {
+  rmSync(STATE_DIR, { recursive: true, force: true });
+});
 
 const ZSTD_MAGIC = 0xfd2fb528;
 
@@ -178,10 +191,15 @@ const ctx = {
     readSession: async (id) => {
       const session = sessions.find((candidate) => candidate.id === id);
       if (session === undefined) throw new Error(`no such session: ${id}`);
+      // The log AS IT WAS at the cutoff. Reading today's complete file instead
+      // would hand the pass settlements that had not been written yet in the
+      // incident — the pass would fold them and nothing would be left for the live
+      // feed, which is precisely the situation this verifier exists to reproduce.
+      const snapshot = session.events.filter((event) => typeof event.time !== 'number' || event.time <= cutoff);
       return {
         session: { cwd: session.cwd, isSeeded: session.isSeeded },
-        events: session.events,
-        inheritedEventCount: inheritedCut(session.events, 0, session.isSeeded),
+        events: snapshot,
+        inheritedEventCount: inheritedCut(snapshot, 0, session.isSeeded),
       };
     },
   },
@@ -229,3 +247,23 @@ for (const day of [...rawByDay.keys()].sort()) {
 }
 console.log('');
 console.log(`today delta vs the pre-cutoff figure: +${totalOf(after.today) - totalOf(before.today)} tokens`);
+
+// Route attribution, which is what the daily totals cannot show: a settlement folded
+// without a route lands on the `unknown` fallback and puts a phantom model in the
+// ring. Every session in this corpus names a route in its own log, so a correct
+// replay leaves that fallback empty — the number to watch is the one below.
+const routeRows = after.routes ?? [];
+const unknownRow = routeRows.find((row) => row.provider === 'unknown' || row.model === 'unknown');
+console.log('');
+console.log(`routes after the replay : ${routeRows.length}`);
+for (const row of routeRows) {
+  console.log(`  ${String(totalOf(row)).padStart(12)}  ${String(row.calls).padStart(6)}c  ${row.provider} / ${row.model}`);
+}
+if (unknownRow === undefined) {
+  console.log('');
+  console.log('OK: no settlement fell through to the unknown route.');
+} else {
+  console.log('');
+  console.log(`FAIL: ${totalOf(unknownRow)} tokens over ${unknownRow.calls} settlements reached the unknown route.`);
+  process.exitCode = 1;
+}

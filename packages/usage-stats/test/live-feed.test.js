@@ -14,6 +14,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+// Redirects the Host half's checkpoint into a throwaway directory. Imported for its
+// side effect and before anything activates the plugin.
+import './support/isolated-state.js';
 import { DATA_PATH, apply } from '../index.js';
 import { localDayKey, totalOf } from '../usage-fold.js';
 
@@ -112,6 +115,20 @@ const EARLY_LIVE = { id: 'early-session', header: { cwd: '/work' } };
 const FRESH_LIVE = { id: 'fresh-session', header: { cwd: '/work' } };
 const BROKEN_LIVE = { id: 'broken-session', header: { cwd: '/work' } };
 
+/** Tokens the payload filed under the `unknown` fallback route. */
+function unknownTotal(payload) {
+  return (payload.routes ?? [])
+    .filter((row) => row.provider === 'unknown' || row.model === 'unknown')
+    .reduce((sum, row) => sum + totalOf(row), 0);
+}
+
+/** Tokens the payload attributed to one provider. */
+function routeTotal(payload, provider) {
+  return (payload.routes ?? [])
+    .filter((row) => row.provider === provider)
+    .reduce((sum, row) => sum + totalOf(row), 0);
+}
+
 /** A readable session that already existed when the corpus pass ran. */
 const EARLY = {
   header: { id: 'early-session', cwd: '/work' },
@@ -169,6 +186,26 @@ test('a listed session still folds only events beyond the pass cursor', async ()
   assert.equal(totalOf(after.today) - totalOf(before.today), 250);
 });
 
+test('a settlement a folded session produces after the pass keeps its model', async () => {
+  // The field shape behind the phantom `unknown` model in the ring: `request/header`
+  // is a CHANGE record, not a per-request one, so a session that keeps running on
+  // the same route appends no new one. The pass folds that session's history and its
+  // header becomes history too — leaving the feed with nothing to attribute the
+  // session's next settlement to, which it filed as `unknown` with real tokens under
+  // it. The pass has to leave the route it ended on behind for the feed.
+  const host = harness([EARLY]);
+  const before = await host.get();
+
+  host.emit(EARLY_LIVE, settlement(5, 400));
+
+  const after = await host.get();
+  assert.equal(unknownTotal(after) - unknownTotal(before), 0, 'nothing is filed under a phantom route');
+  const named = routeTotal(after, 'prov-a') - routeTotal(before, 'prov-a');
+  assert.equal(named, 400, 'the settlement joined the route the log last named');
+  const row = after.routes.find((candidate) => candidate.provider === 'prov-a');
+  assert.equal(row.model, 'model-a', 'and it kept that route\'s model');
+});
+
 test('a session the pass could not read hands its live settlements to the feed', async () => {
   // BROKEN is LISTED here, which is what makes this the release path rather than the
   // generic "never listed" one: the pass claims a listed session's history, so it has
@@ -185,6 +222,9 @@ test('a session the pass could not read hands its live settlements to the feed',
   const after = await host.get();
   assert.equal(after.today.calls - before.today.calls, 1, 'the released session is adopted by the feed');
   assert.equal(totalOf(after.today) - totalOf(before.today), 320);
+  // This log names no route at all, so `unknown` is the honest answer here rather
+  // than a bug: the fallback exists for exactly this, and must not be removed.
+  assert.equal(unknownTotal(after) - unknownTotal(before), 320, 'a route-less session reports unknown');
   // And it is not re-counted on every later poll.
   const settled = await host.get();
   assert.equal(settled.today.calls, after.today.calls, 'the adoption does not repeat');

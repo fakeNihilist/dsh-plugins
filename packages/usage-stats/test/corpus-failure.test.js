@@ -15,6 +15,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+// Redirects the Host half's checkpoint into a throwaway directory. Imported for its
+// side effect and before anything activates the plugin.
+import './support/isolated-state.js';
 import { DATA_PATH, apply, reasonOf } from '../index.js';
 
 /** One `assistant/message` carrying a settlement. */

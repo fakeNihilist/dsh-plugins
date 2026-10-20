@@ -26,8 +26,19 @@ import {
   enumerateDays,
   foldSessionIntoAggregate,
   localDayKey,
+  routeOf,
   shiftDay,
 } from './usage-fold.js';
+import {
+  artifactFingerprints,
+  checkpointPath,
+  CHECKPOINT_VERSION,
+  FOLD_VERSION,
+  fingerprintMatches,
+  readCheckpoint,
+  routeEventOf,
+  writeCheckpoint,
+} from './checkpoint.js';
 
 /** Cordis plugin name. */
 export const name = 'usage-stats';
@@ -58,6 +69,16 @@ const FAILURE_REASON_LIMIT = 20;
 
 /** Live-fold errors echoed to the Host console before going quiet. */
 const LIVE_FOLD_ERROR_LIMIT = 3;
+
+/**
+ * How long live settlements may go uncheckpointed.
+ *
+ * A settlement changes a handful of counters, so writing the checkpoint on every
+ * one would replace a read problem with a write problem. The debounce is safe to
+ * lose: an unwritten checkpoint simply means the next start re-reads the sessions
+ * whose logs moved, which is exactly what it would have done anyway.
+ */
+const SAVE_DEBOUNCE_MS = 2_000;
 
 /**
  * Module-level ledger of one server process.
@@ -98,6 +119,32 @@ const ledger = {
    * up: nothing else can ever count it.
    */
   corpus: new Set(),
+  /**
+   * Artifact fingerprint per session id, as of the moment the checkpoint captured
+   * that session's tokens.
+   *
+   * This is what lets a start skip a session entirely: if the log's size and mtime
+   * still match, nothing has been appended since it was folded, so re-reading it
+   * cannot change a single number. Reading a log is 99% of a cold pass, so this one
+   * comparison is where the whole optimisation lives.
+   */
+  fingerprints: new Map(),
+  /**
+   * The artifact scan the current pass planned against, so a folded session can be
+   * stamped without walking the store again per session.
+   */
+  artifacts: new Map(),
+  /**
+   * Session ids the loaded checkpoint already accounts for.
+   *
+   * Held until the first listing can confirm every one of them still exists: a
+   * folded aggregate cannot have one session subtracted from it, so a corpus that
+   * shrank is a reason to throw the checkpoint away rather than keep its tokens.
+   */
+  checkpointSessions: new Set(),
+  /** Set while the checkpoint on disk is behind the in-memory aggregate. */
+  dirty: false,
+  saveTimer: null,
   /** Set once the corpus has been enumerated, so backfill is a one-time job. */
   seeded: false,
   seeding: false,
@@ -118,6 +165,120 @@ const ledger = {
 function localOffsetMinutes() {
   return -new Date().getTimezoneOffset();
 }
+
+//#region checkpoint
+
+/**
+ * Adopt a checkpoint written by an earlier process, if one can be trusted.
+ *
+ * Everything the checkpoint carries is derived state, so this never has to be
+ * careful about what it loses: a rejected file means the pass folds the corpus from
+ * the logs, which is what every start did before the checkpoint existed.
+ *
+ * The timezone is already in `ledger` by the time this runs, because day buckets
+ * are cut with it and a checkpoint folded under a different offset would keep
+ * yesterday's boundaries.
+ */
+function loadCheckpoint() {
+  const stored = readCheckpoint(checkpointPath(), { tzOffsetMinutes: ledger.tzOffsetMinutes });
+  if (stored === null) return;
+  ledger.aggregate = stored.aggregate;
+  for (const [id, entry] of Object.entries(stored.sessions)) {
+    if (!isSessionEntry(entry)) continue;
+    if (typeof entry.cursor === 'number' && Number.isFinite(entry.cursor)) {
+      ledger.sessionCursor.set(id, entry.cursor);
+    }
+    const route = routeEventOf(entry.route);
+    if (route !== null) ledger.sessionRoute.set(id, route);
+    if (isFingerprint(entry)) ledger.fingerprints.set(id, { size: entry.size, mtimeMs: entry.mtimeMs });
+    ledger.checkpointSessions.add(id);
+  }
+  // Telemetry is deliberately NOT restored. Its counters describe the corpus as
+  // THIS process found it — sessions scanned, sessions unreadable, failure causes —
+  // and `planPass`/`backfill` re-derive every one of them. Restoring them would add
+  // this process's count on top of the previous process's, so the panel's "N
+  // sessions unreadable" would grow with every restart.
+}
+
+/** Whether one checkpoint session entry has the shape this version wrote. */
+function isSessionEntry(entry) {
+  return typeof entry === 'object' && entry !== null && !Array.isArray(entry);
+}
+
+/** Whether an entry carries a usable artifact fingerprint. */
+function isFingerprint(entry) {
+  return typeof entry.size === 'number' && Number.isFinite(entry.size)
+    && typeof entry.mtimeMs === 'number' && Number.isFinite(entry.mtimeMs);
+}
+
+/**
+ * Throw the checkpoint away and go back to folding everything.
+ *
+ * Used when the corpus no longer matches what was folded: a session that has been
+ * deleted cannot be subtracted from a folded aggregate, and rebuilding is both
+ * cheap and exactly what the pass does anyway.
+ */
+function discardCheckpoint() {
+  ledger.aggregate = emptyAggregate();
+  ledger.sessionCursor.clear();
+  ledger.sessionRoute.clear();
+  ledger.fingerprints.clear();
+  ledger.checkpointSessions.clear();
+  ledger.telemetry = { sessionsScanned: 0, sessionsFailed: 0, recovered: 0, corpusFailures: 0, failureReasons: [] };
+  ledger.dirty = true;
+}
+
+/** Snapshot the ledger into the checkpoint's on-disk shape. */
+function checkpointPayload() {
+  /** @type {Record<string, {cursor: number, route: object|null, size?: number, mtimeMs?: number}>} */
+  const sessions = {};
+  for (const [id, cursor] of ledger.sessionCursor) {
+    const stored = ledger.fingerprints.get(id);
+    const route = routeOf(ledger.sessionRoute.get(id)?.data) ?? null;
+    sessions[id] = {
+      cursor,
+      route,
+      ...(stored === undefined ? {} : { size: stored.size, mtimeMs: stored.mtimeMs }),
+    };
+  }
+  return {
+    version: CHECKPOINT_VERSION,
+    foldVersion: FOLD_VERSION,
+    tzOffsetMinutes: ledger.tzOffsetMinutes,
+    savedAt: Date.now(),
+    aggregate: ledger.aggregate,
+    sessions,
+    // No telemetry: those counters are per-process derivations, re-derived by the
+    // next start, not durable facts about the corpus.
+  };
+}
+
+/** Write the checkpoint now, if anything has moved since the last write. */
+function flushCheckpoint() {
+  if (ledger.saveTimer !== null) {
+    clearTimeout(ledger.saveTimer);
+    ledger.saveTimer = null;
+  }
+  if (!ledger.dirty) return;
+  ledger.dirty = false;
+  // A write failure is not surfaced: the cache is an optimisation, and a read-only
+  // state directory must not turn into a broken panel.
+  writeCheckpoint(checkpointPath(), checkpointPayload());
+}
+
+/** Mark the checkpoint stale and write it once the churn settles. */
+function scheduleCheckpoint() {
+  ledger.dirty = true;
+  if (ledger.saveTimer !== null) return;
+  ledger.saveTimer = setTimeout(() => {
+    ledger.saveTimer = null;
+    flushCheckpoint();
+  }, SAVE_DEBOUNCE_MS);
+  // A pending debounce must not hold the host process open on shutdown.
+  if (typeof ledger.saveTimer.unref === 'function') ledger.saveTimer.unref();
+}
+
+//#endregion
 
 /**
  * The first day a payload's window should cover.
@@ -198,6 +359,10 @@ export function inheritedCut(events, reported, isSeeded) {
  * attribution is seeded from `sessionRoute` because a pre-cut
  * `request/header` is the only thing naming the model for the next settlement.
  *
+ * It also leaves the session's route behind for the live feed, which is the only
+ * way a settlement that arrives after the pass keeps its model: by then the header
+ * that named it is history the feed never saw.
+ *
  * @param {{ id: string, cwd?: string | null, isSeeded?: boolean }} session - identity, workspace, fork lineage.
  * @param {readonly unknown[]} events - its complete raw log.
  * @param {number} reportedInherited - the snapshot's `inheritedEventCount`.
@@ -237,12 +402,43 @@ function foldSession(session, events, reportedInherited) {
   }
 
   let highest = lastIndexed ?? -1;
+  // The route that governs this session's NEXT settlement. Tracked with the same
+  // precedence the fold itself uses — the newest header wins, and a context only
+  // counts until the next header replaces it — so the two can never disagree.
+  let lastHeader = null;
+  let lastContext = null;
   for (const raw of events) {
     if (typeof raw !== 'object' || raw === null) continue;
     const seq = raw.seq;
     if (typeof seq === 'number' && seq > highest) highest = seq;
+    if (raw.type === 'request/header') {
+      if (routeOf(raw.data) !== null) {
+        lastHeader = raw;
+        lastContext = null;
+      }
+      continue;
+    }
+    if (raw.type === 'request/context' && lastContext === null && routeOf(raw.data) !== null) {
+      lastContext = raw;
+    }
   }
   ledger.sessionCursor.set(session.id, highest);
+
+  // Seed the live feed's route cache for this session.
+  //
+  // `request/header` is a change record, not a per-request one: the corpus logs a
+  // few hundred of them against thousands of settlements. So a session that keeps
+  // running on the same route appends nothing new, and once the pass has folded its
+  // history there is no route event left for the feed to read. Without this seed
+  // every settlement a folded session produced after the pass was filed under
+  // `unknown`, which is what put a phantom model in the ring.
+  //
+  // Seeding only, never overwriting: a route the feed saw live is at least as new
+  // as anything this re-read can still be missing from the log.
+  const lastRoute = lastHeader ?? lastContext;
+  if (lastRoute !== null && !ledger.sessionRoute.has(session.id)) {
+    ledger.sessionRoute.set(session.id, lastRoute);
+  }
 }
 
 /**
@@ -419,9 +615,82 @@ function readLegacySession(sessionId) {
 //#endregion
 
 /**
+ * Decide, for every listed session, whether its log has to be read at all.
+ *
+ * A session the checkpoint already folded, whose artifact still carries the same
+ * size and mtime, cannot produce a different number: nothing has been appended since
+ * it was folded. Reading is 99% of a pass, so this comparison is the entire
+ * optimisation — a restart re-reads what changed since last time and nothing else.
+ *
+ * The whole decision runs in ONE synchronous block, which is load-bearing. Live
+ * `session/event` callbacks run on this same thread and cannot interleave with it,
+ * so there is no instant at which a session is neither claimed by the pass nor
+ * released to the feed: a claimed session has its live events held back until the
+ * fold catches up, and a released one needs them immediately.
+ *
+ * @param {object[]} records - the corpus listing.
+ * @returns {object[]} the records whose logs must actually be read.
+ */
+function planPass(records) {
+  const root = sessionsRoot();
+  // A store layout this cannot read yields an empty scan, which makes every session
+  // look changed. That degrades to a full pass, never to a wrong number.
+  const artifacts = root === null ? new Map() : artifactFingerprints(root);
+  ledger.artifacts = artifacts;
+
+  const listed = new Set();
+  for (const record of records) listed.add(String(record.header.id));
+
+  // A folded aggregate cannot give one session's contribution back, so a corpus
+  // that lost a session is rebuilt rather than patched.
+  for (const id of ledger.checkpointSessions) {
+    if (listed.has(id)) continue;
+    discardCheckpoint();
+    break;
+  }
+  ledger.checkpointSessions.clear();
+
+  const pending = [];
+  for (const record of records) {
+    const id = String(record.header.id);
+    if (ledger.unreadable.has(id)) continue;
+    ledger.corpus.add(id);
+    if (ledger.sessionCursor.has(id) && fingerprintMatches(ledger.fingerprints.get(id), artifacts.get(id))) {
+      // Already folded and untouched since. Hand it straight back to the live feed,
+      // which owns it from the cursor the checkpoint restored.
+      ledger.corpus.delete(id);
+      ledger.telemetry.sessionsScanned += 1;
+      continue;
+    }
+    pending.push(record);
+  }
+  return pending;
+}
+
+/**
+ * Record the fingerprint the fold just accounted for.
+ *
+ * The value comes from the scan `planPass` took rather than a fresh stat: a stat
+ * taken after the read could describe content the fold never saw, and calling that
+ * "already folded" would lose it for good. Storing the older value can only cause
+ * one extra re-read, which is the harmless direction.
+ * @param {string} id - the session id.
+ */
+function rememberFingerprint(id) {
+  const observed = ledger.artifacts.get(id);
+  if (observed !== undefined) ledger.fingerprints.set(id, observed);
+}
+
+/**
  * One pass over the stored corpus. Concurrent callers share the in-flight pass,
  * and the pass itself runs ONCE per process: after it settles nothing lists or
  * re-reads unreadable sessions again.
+ *
+ * A session whose log has not been touched since the checkpoint folded it is
+ * accounted for WITHOUT being read — see {@link planPass}. Reading is the whole
+ * cost of a pass, so this is what turns a restart from "fold the entire corpus" into
+ * "fold whatever changed since last time".
+ *
  * @param {object} sessionQuery - the `ctx.sessionQuery` service.
  * @returns {Promise<void>} after every listable session has been accounted for.
  */
@@ -432,11 +701,7 @@ async function backfill(sessionQuery) {
     ledger.seeding = true;
     try {
       const records = await sessionQuery.listSessions();
-      for (const record of records) ledger.corpus.add(String(record.header.id));
-      const pending = records.filter((record) => {
-        const id = String(record.header.id);
-        return !ledger.sessionCursor.has(id) && !ledger.unreadable.has(id);
-      });
+      const pending = planPass(records);
       for (let offset = 0; offset < pending.length; offset += BACKFILL_BATCH_SIZE) {
         const batch = pending.slice(offset, offset + BACKFILL_BATCH_SIZE);
         /* eslint-disable no-await-in-loop -- bounded batching keeps I/O pressure predictable. */
@@ -454,6 +719,10 @@ async function backfill(sessionQuery) {
               snapshot.inheritedEventCount,
             );
             ledger.telemetry.sessionsScanned += 1;
+            // Record the fingerprint AFTER reading, so it describes a state the fold
+            // has definitely seen. A write that lands in between only makes the next
+            // start re-read one session, which is the harmless direction.
+            rememberFingerprint(id);
           } catch (error) {
             // The service cannot migrate this log; recover its usage directly
             // rather than letting real tokens disappear from the totals.
@@ -471,6 +740,7 @@ async function backfill(sessionQuery) {
               // pass must not retry it — but the usage is now counted, which is what
               // keeps the tokens from vanishing.
               ledger.unreadable.set(id, reasonOf(error));
+              rememberFingerprint(id);
               return;
             }
             markUnreadable(id, error);
@@ -480,6 +750,12 @@ async function backfill(sessionQuery) {
         ledger.revision += 1;
       }
       ledger.seeded = true;
+      // First capture of a corpus the pass just folded, or the refresh after an
+      // incremental one. Written only here and on the live debounce, so a failed
+      // enumeration (which throws before this line) never stores a corpus that
+      // looks complete.
+      ledger.dirty = true;
+      flushCheckpoint();
     } finally {
       ledger.seeding = false;
       ledger.backfill = null;
@@ -547,6 +823,9 @@ function onSessionEvent(session, event) {
   );
   ledger.sessionCursor.set(id, seq);
   ledger.revision += 1;
+  // The cursor moved, so the checkpoint on disk now describes a shorter log than the
+  // aggregate holds. Written on a debounce rather than per settlement.
+  scheduleCheckpoint();
 }
 
 /** JSON response helper. */
@@ -642,6 +921,10 @@ function createHandler(ctx) {
  */
 export function apply(ctx) {
   ledger.tzOffsetMinutes = localOffsetMinutes();
+  // Adopted before anything can fold, because the live feed consults the cursors and
+  // routes it restores: a settlement that arrives before the first request would
+  // otherwise be attributed from nothing.
+  loadCheckpoint();
 
   ctx.effect(
     () => ctx.on('session/event', (session, event) => {
@@ -658,6 +941,15 @@ export function apply(ctx) {
       }
     }),
     'usage-stats: live settlement feed',
+  );
+
+  ctx.effect(
+    () => () => {
+      // Folded settlements must not be lost to a deactivation that outlives the
+      // debounce; the pass also writes on its own way out.
+      flushCheckpoint();
+    },
+    'usage-stats: checkpoint writer',
   );
 
   const connection = Reflect.get(ctx, 'connection');

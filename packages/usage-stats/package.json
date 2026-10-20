@@ -4,6 +4,25 @@
   "private": true,
   "type": "module",
   "description": "Whole-corpus token usage statistics: daily and cumulative tokens, cache hit rate, per-model breakdown, and a year-long activity heatmap.",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis-plugin",
+    "token-usage",
+    "usage-statistics",
+    "dashboard",
+    "heatmap",
+    "cache-hit-rate"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fakeNihilist/dsh-plugins.git",
+    "directory": "packages/usage-stats"
+  },
+  "homepage": "https://github.com/fakeNihilist/dsh-plugins/tree/main/packages/usage-stats#readme",
+  "author": "fakeNihilist",
   "icon": "./icon.svg",
   "exports": {
     ".": "./index.js",
@@ -15,6 +34,7 @@
     "index.js",
     "client.js",
     "usage-fold.js",
+    "checkpoint.js",
     "cordis.patch.yml",
     "icon.svg",
     "locale/*.json",
@@ -29,7 +49,8 @@
     "verify:v0": "node verify/v0-artifacts.js",
     "verify:corpus": "node verify/corpus-pass.js",
     "verify:trend": "node verify/trend-inspect.js",
-    "verify:replay": "node verify/live-replay.js"
+    "verify:replay": "node verify/live-replay.js",
+    "verify:gain": "node verify/incremental-gain.js"
   },
   "dsh": {
     "bundle": {

@@ -284,10 +284,14 @@ function workspaceRouteDayRowFor(aggregate, workspaceKey, day, provider, model) 
  * `'request/header'` nests the call config at `data.header.config`; a
  * `'request/context'` event carries the fields directly. Both shapes are
  * accepted because the durable logs in the field may be either.
+ *
+ * Exported so the Host can ask the same question the fold asks while it is
+ * tracking a session's route events, instead of restating the shapes and drifting
+ * from them.
  * @param {object} data - the event's `data`.
  * @returns {{ provider: string, model: string }|null} the route, or null when neither field is present.
  */
-function routeOf(data) {
+export function routeOf(data) {
   if (typeof data !== 'object' || data === null) return null;
   const header = data.header;
   const nested = header !== undefined && header !== null && typeof header === 'object' ? header.config : undefined;
