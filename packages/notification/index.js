@@ -13,7 +13,9 @@
  *
  *  1. claims `POST /api/notification.toast` and raises a real WinRT toast from
  *     PowerShell, with a synthesized WAV played through `SoundPlayer` so the two
- *     attention kinds sound different;
+ *     attention kinds sound different. The route answers only after the helper
+ *     process exits (bounded wait), so a Windows-side failure can still fall back
+ *     to the renderer notification instead of vanishing;
  *  2. registers a `dsh-notify:` URL protocol (HKCU) whose handler writes the
  *     clicked Session id into a small reveal file and then launches the DSH
  *     desktop app's own `dsh://open` protocol to restore the window;
@@ -63,9 +65,18 @@ const SOUND_FILES = { completed: 'complete.wav', confirm: 'confirm.wav' };
 /** Minimum gap between two focus round trips, so a double click cannot stack instances. */
 const FOCUS_COOLDOWN_MS = 3000;
 
+/**
+ * How long the toast route waits for its helper process before answering. Covers
+ * PowerShell start-up plus the ~0.6 s WAV; a stuck helper must not hold the route.
+ */
+const TOAST_CLOSE_TIMEOUT_MS = 5000;
+
 /** Toast copy limits, so a long Session title cannot overflow the toast. */
 const TITLE_MAX = 96;
 const BODY_MAX = 320;
+
+/** Longest accepted activation value; real Session ids are far shorter. */
+const REVEAL_MAX_LENGTH = 256;
 
 /** Timestamp of the last accepted focus request. */
 let lastFocusAt = 0;
@@ -132,47 +143,117 @@ Remove-Item -LiteralPath $PayloadPath -Force -ErrorAction SilentlyContinue
  * creates a console window for it. Launching `powershell.exe` from the protocol
  * key would flash (or leave) a black console window even with `-WindowStyle
  * Hidden`, which is exactly the artifact this handler must avoid.
+ *
+ * The launch URL is percent-encoded UTF-8 (`EscapeDataString` on the Host), and
+ * VBScript's own `Asc`/`Chr` text helpers are ANSI-codepage bound, so this script
+ * carries a small byte-level decoder instead of the old `Chr(CLng(...))` loop:
+ * decode into code points with `ChrW`, then let `ADODB.Stream` write UTF-8. The
+ * activation log is capped, because any local program can invoke this protocol.
  */
 const REVEAL_SCRIPT = String.raw`Option Explicit
 On Error Resume Next
-Dim url, here, id, target, staging, stream, shell, fso
+Dim url, here, id, target, staging, stream, shell, fso, logPath, logFile
 url = WScript.Arguments(0)
 Set fso = CreateObject("Scripting.FileSystemObject")
 here = fso.GetParentFolderName(WScript.ScriptFullName)
-Dim logFile
-Set logFile = fso.OpenTextFile(here & "\reveal.log", 8, True)
+logPath = here & "\reveal.log"
+' Keep the diagnostic log bounded: every protocol invocation appends one line.
+If fso.FileExists(logPath) Then
+  If fso.GetFile(logPath).Size > 1048576 Then fso.DeleteFile logPath, True
+End If
+Set logFile = fso.OpenTextFile(logPath, 8, True)
 logFile.WriteLine Now & " " & url
 logFile.Close
 If InStr(1, url, "dsh-notify://reveal/", vbTextCompare) = 1 Then
-  id = Mid(url, Len("dsh-notify://reveal/") + 1)
-  id = UrlDecode(id)
-  target = here & "\reveal.json"
-  staging = here & "\reveal." & Replace(fso.GetTempName(), ".", "") & ".tmp"
-  Set stream = CreateObject("ADODB.Stream")
-  stream.Type = 2
-  stream.Charset = "utf-8"
-  stream.Open
-  stream.WriteText id
-  stream.SaveToFile staging, 2
-  stream.Close
-  fso.DeleteFile target, True
-  fso.MoveFile staging, target
+  id = DecodeUrl(Mid(url, Len("dsh-notify://reveal/") + 1))
+  If Len(id) > 0 Then
+    target = here & "\reveal.json"
+    staging = here & "\reveal." & Replace(fso.GetTempName(), ".", "") & ".tmp"
+    Set stream = CreateObject("ADODB.Stream")
+    stream.Type = 2
+    stream.Charset = "utf-8"
+    stream.Open
+    stream.WriteText id
+    stream.SaveToFile staging, 2
+    stream.Close
+    fso.DeleteFile target, True
+    fso.MoveFile staging, target
+  End If
 End If
 Set shell = CreateObject("WScript.Shell")
 shell.Run "dsh://open", 0, False
 
-Function UrlDecode(value)
-  Dim index, code, result
-  result = value
+' Percent-decode then assemble the UTF-8 bytes into a Unicode string.
+Function DecodeUrl(value)
+  Dim bytes(), total, index, ch, hex
+  If Len(value) = 0 Then
+    DecodeUrl = ""
+    Exit Function
+  End If
+  ReDim bytes(Len(value) - 1)
+  total = 0
   index = 1
-  Do While index <= Len(result) - 2
-    If Mid(result, index, 1) = "%" Then
-      code = Mid(result, index + 1, 2)
-      result = Left(result, index - 1) & Chr(CLng("&H" & code)) & Mid(result, index + 3)
+  Do While index <= Len(value)
+    ch = Mid(value, index, 1)
+    If ch = "%" And index + 2 <= Len(value) Then
+      hex = Mid(value, index + 1, 2)
+      If IsHex(hex) Then
+        bytes(total) = CLng("&H" & hex)
+        total = total + 1
+        index = index + 3
+      Else
+        bytes(total) = 37
+        total = total + 1
+        index = index + 1
+      End If
+    Else
+      bytes(total) = Asc(ch)
+      total = total + 1
+      index = index + 1
     End If
-    index = index + 1
   Loop
-  UrlDecode = result
+  DecodeUrl = Utf8Text(bytes, total)
+End Function
+
+Function IsHex(value)
+  IsHex = Len(value) = 2 And IsHexChar(Mid(value, 1, 1)) And IsHexChar(Mid(value, 2, 1))
+End Function
+
+Function IsHexChar(ch)
+  Dim code
+  code = Asc(UCase(ch))
+  IsHexChar = (code >= 48 And code <= 57) Or (code >= 65 And code <= 70)
+End Function
+
+' Decode UTF-8 bytes into UTF-16 (VBScript strings); invalid input becomes U+FFFD.
+Function Utf8Text(bytes, total)
+  Dim index, b, point, result
+  result = ""
+  index = 0
+  Do While index < total
+    b = bytes(index)
+    If b < 128 Then
+      result = result & ChrW(b)
+      index = index + 1
+    ElseIf (b And 224) = 192 And index + 1 < total Then
+      point = ((b And 31) * 64) + (bytes(index + 1) And 63)
+      result = result & ChrW(point)
+      index = index + 2
+    ElseIf (b And 240) = 224 And index + 2 < total Then
+      point = ((b And 15) * 4096) + ((bytes(index + 1) And 63) * 64) + (bytes(index + 2) And 63)
+      result = result & ChrW(point)
+      index = index + 3
+    ElseIf (b And 248) = 240 And index + 3 < total Then
+      point = ((b And 7) * 262144) + ((bytes(index + 1) And 63) * 4096) + ((bytes(index + 2) And 63) * 64) + (bytes(index + 3) And 63)
+      point = point - 65536
+      result = result & ChrW(55296 + (point \ 1024)) & ChrW(56320 + (point Mod 1024))
+      index = index + 4
+    Else
+      result = result & ChrW(65533)
+      index = index + 1
+    End If
+  Loop
+  Utf8Text = result
 End Function
 `;
 
@@ -236,6 +317,27 @@ const CONFIRM_NOTES = [
 ];
 
 /**
+ * Write one synthesized WAV only when its bytes changed, so an upgrade with new
+ * motifs actually replaces the stale asset a previous version left behind.
+ * @param target - absolute WAV path.
+ * @param bytes - synthesized RIFF/WAVE payload.
+ */
+export function writeSoundIfChanged(target, bytes) {
+  try {
+    if (existsSync(target)) {
+      try {
+        if (readFileSync(target).equals(bytes)) return;
+      } catch {
+        /* unreadable: rewrite below */
+      }
+    }
+    writeFileSync(target, bytes);
+  } catch (error) {
+    console.warn('[dsh-notification] could not write the notification sound', target, error);
+  }
+}
+
+/**
  * Write helper scripts and both WAV files, and register the toast protocol. Runs
  * on every activation; all writes are idempotent and only under HKCU plus the
  * plugin's own directory.
@@ -266,17 +368,21 @@ export function prepareAssets() {
     } catch {
       /* ignore */
     }
-    if (!existsSync(completionSound)) writeFileSync(completionSound, synthesizeWav(COMPLETION_NOTES, 'sine'));
-    if (!existsSync(confirmSound)) writeFileSync(confirmSound, synthesizeWav(CONFIRM_NOTES, 'triangle'));
+    writeSoundIfChanged(completionSound, synthesizeWav(COMPLETION_NOTES, 'sine'));
+    writeSoundIfChanged(confirmSound, synthesizeWav(CONFIRM_NOTES, 'triangle'));
     for (const entry of readdirSafe(directory)) {
-      if (!entry.startsWith('payload-') || !entry.endsWith('.json')) continue;
+      const stalePayload = entry.startsWith('payload-') && entry.endsWith('.json');
+      const staleStaging = entry.startsWith('reveal.') && entry.endsWith('.tmp');
+      if (!stalePayload && !staleStaging) continue;
       try {
         rmSync(join(directory, entry), { force: true });
       } catch {
         /* a live toast may still hold the file */
       }
     }
-    registerProtocol(revealScript);
+    if (!registerProtocol(revealScript)) {
+      console.warn('[dsh-notification] the dsh-notify protocol is not registered; toast clicks cannot open Sessions');
+    }
     return { directory, toastScript, revealScript, completionSound, confirmSound };
   } catch (error) {
     console.warn('[dsh-notification] could not prepare Windows toast assets', error);
@@ -305,8 +411,10 @@ function readdirSafe(directory) {
  * console host such as PowerShell or cmd, so clicking a toast never flashes a
  * black box. `//nologo` suppresses the banner; the script itself runs hidden.
  * @param revealScript - absolute path of the activation handler.
+ * @param run - synchronous process runner seam (injectable for tests).
+ * @returns whether every registry write succeeded.
  */
-export function registerProtocol(revealScript) {
+export function registerProtocol(revealScript, run = spawnSync) {
   const wscript = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'wscript.exe');
   const command = `"${wscript}" //nologo "${revealScript}" "%1"`;
   const keys = [
@@ -314,14 +422,23 @@ export function registerProtocol(revealScript) {
     ['HKCU\\Software\\Classes\\dsh-notify', ['/v', 'URL Protocol', '/d', '', '/f']],
     ['HKCU\\Software\\Classes\\dsh-notify\\shell\\open\\command', ['/ve', '/d', command, '/f']],
   ];
+  let registered = true;
   for (const [key, args] of keys) {
     try {
-      const result = spawnSync('reg.exe', ['add', key, ...args], { windowsHide: true, stdio: 'ignore' });
-      if (result.error !== undefined) console.warn('[dsh-notification] protocol registration failed', result.error);
+      const result = run('reg.exe', ['add', key, ...args], { windowsHide: true, stdio: 'ignore' });
+      if (result.error !== undefined) {
+        registered = false;
+        console.warn('[dsh-notification] protocol registration failed', result.error);
+      } else if (typeof result.status === 'number' && result.status !== 0) {
+        registered = false;
+        console.warn('[dsh-notification] protocol registration exited with status', result.status, 'for', key);
+      }
     } catch (error) {
+      registered = false;
       console.warn('[dsh-notification] protocol registration failed', error);
     }
   }
+  return registered;
 }
 
 //#endregion
@@ -340,14 +457,17 @@ export function clampText(value, limit) {
 }
 
 /**
- * Show one Windows toast for an attention event. Fire-and-forget: a slow
- * PowerShell start must never stall the agent loop that raised the event.
+ * Show one Windows toast for an attention event and report whether the helper
+ * actually delivered it. The route awaits this answer so the browser half can
+ * fall back when Windows rejects the toast; the wait is bounded so a slow
+ * PowerShell start cannot stall the agent loop that raised the event.
  * @param assets - prepared asset paths.
  * @param event - `{ kind, sessionId, title, body }`.
- * @returns whether the toast process was spawned.
+ * @param spawnProcess - child-process seam (injectable for tests).
+ * @returns whether the helper exited cleanly, which means the toast was shown.
  */
-export function showToast(assets, event) {
-  if (assets === undefined) return false;
+export function showToast(assets, event, spawnProcess = spawn) {
+  if (assets === undefined) return Promise.resolve(false);
   const payloadPath = join(assets.directory, `payload-${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}.json`);
   const payload = {
     sessionId: event.sessionId,
@@ -359,45 +479,67 @@ export function showToast(assets, event) {
   };
   try {
     writeFileSync(payloadPath, JSON.stringify(payload), 'utf8');
-    const child = spawn(
-      powershellPath(),
-      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', assets.toastScript, '-PayloadPath', payloadPath],
-      { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] },
-    );
+  } catch (error) {
+    console.warn('[dsh-notification] could not write the toast payload', error);
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer;
+    const removePayload = () => {
+      try {
+        rmSync(payloadPath, { force: true });
+      } catch {
+        /* a live toast may still hold the file */
+      }
+    };
+    const finish = (shown) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(shown);
+    };
+    let child;
+    try {
+      child = spawnProcess(
+        powershellPath(),
+        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', assets.toastScript, '-PayloadPath', payloadPath],
+        { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] },
+      );
+    } catch (error) {
+      console.warn('[dsh-notification] could not raise the Windows toast', error);
+      removePayload();
+      finish(false);
+      return;
+    }
     let stderr = '';
-    if (child.stderr !== null) {
+    if (typeof child.stderr?.on === 'function') {
       child.stderr.on('data', (chunk) => {
         if (stderr.length < 2000) stderr += String(chunk);
       });
     }
+    // The helper removes the payload after a successful toast. A failed or
+    // missing helper leaves it behind, so the route removes it here.
     child.on('error', (error) => {
       console.warn('[dsh-notification] could not start the toast process', error);
-      try {
-        rmSync(payloadPath, { force: true });
-      } catch {
-        /* ignore */
-      }
+      removePayload();
+      finish(false);
     });
     child.on('close', (code) => {
-      if (code === 0) return;
-      console.warn('[dsh-notification] the toast script failed', code, stderr.trim());
-      try {
-        rmSync(payloadPath, { force: true });
-      } catch {
-        /* ignore */
+      if (code === 0) {
+        finish(true);
+        return;
       }
+      console.warn('[dsh-notification] the toast script failed', code, stderr.trim());
+      removePayload();
+      finish(false);
     });
-    child.unref();
-    return true;
-  } catch (error) {
-    console.warn('[dsh-notification] could not raise the Windows toast', error);
-    try {
-      rmSync(payloadPath, { force: true });
-    } catch {
-      /* ignore */
-    }
-    return false;
-  }
+    timer = setTimeout(() => {
+      console.warn('[dsh-notification] the toast helper did not finish in time');
+      finish(false);
+    }, TOAST_CLOSE_TIMEOUT_MS);
+    timer.unref?.();
+  });
 }
 
 /**
@@ -410,9 +552,13 @@ export function takeReveal(directory) {
   const target = join(directory, 'reveal.json');
   try {
     if (!existsSync(target)) return undefined;
-    const sessionId = readFileSync(target, 'utf8').trim();
+    // ADODB.Stream prefixes its UTF-8 files with a BOM; tolerate it explicitly
+    // instead of relying on `trim()`, and refuse absurd values a stray local
+    // writer might leave behind.
+    const sessionId = readFileSync(target, 'utf8').replace(/^\uFEFF/u, '').trim();
     rmSync(target, { force: true });
-    return sessionId.length === 0 ? undefined : sessionId;
+    if (sessionId.length === 0 || sessionId.length > REVEAL_MAX_LENGTH) return undefined;
+    return sessionId;
   } catch {
     return undefined;
   }
@@ -498,7 +644,7 @@ export function registerRoutes(ctx, assets) {
           if (payload === null || typeof payload !== 'object' || typeof payload.sessionId !== 'string' || payload.sessionId.length === 0) {
             return json({ error: 'sessionId is required' }, 400);
           }
-          const shown = showToast(assets, {
+          const shown = await showToast(assets, {
             kind: payload.kind === 'completed' ? 'completed' : 'confirm',
             sessionId: payload.sessionId,
             title: clampText(payload.title, TITLE_MAX),

@@ -7,7 +7,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,9 +19,12 @@ import {
   clampText,
   inject,
   name,
+  registerProtocol,
   registerRoutes,
+  showToast,
   synthesizeWav,
   takeReveal,
+  writeSoundIfChanged,
 } from "../index.js";
 
 /**
@@ -163,4 +167,126 @@ test("the two motifs have different lengths and payloads", () => {
 test("takeReveal tolerates a missing plugin directory", () => {
   assert.equal(takeReveal(undefined), undefined);
   assert.equal(takeReveal(join(tmpdir(), "dsh-notification-missing-dir")), undefined);
+});
+
+test("takeReveal strips the BOM ADODB.Stream writes and consumes the file once", () => {
+  const directory = mkdtempSync(join(tmpdir(), "dsh-notification-reveal-"));
+  try {
+    writeFileSync(join(directory, "reveal.json"), "\uFEFFsession-bom\n", "utf8");
+    assert.equal(takeReveal(directory), "session-bom");
+    assert.equal(takeReveal(directory), undefined);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Child-process seam: reports one outcome on the next tick and records the call.
+ * @param outcome - `{ code }` for a helper exit, or `{ error }` for a spawn failure.
+ * @returns `{ calls, spawnProcess }`.
+ */
+function createSpawn(outcome) {
+  const calls = [];
+  const spawnProcess = (command, args, options) => {
+    calls.push({ command, args, options });
+    const child = new EventEmitter();
+    child.stderr = new EventEmitter();
+    process.nextTick(() => {
+      if (outcome.error !== undefined) child.emit("error", outcome.error);
+      else child.emit("close", outcome.code);
+    });
+    return child;
+  };
+  return { calls, spawnProcess };
+}
+
+/** @param directory - temp plugin directory. @returns prepared asset paths. */
+function createToastAssets(directory) {
+  return {
+    directory,
+    toastScript: join(directory, "toast.ps1"),
+    revealScript: join(directory, "reveal.vbs"),
+    completionSound: join(directory, "complete.wav"),
+    confirmSound: join(directory, "confirm.wav"),
+  };
+}
+
+test("showToast resolves true only when the helper exits cleanly", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dsh-notification-show-"));
+  try {
+    const { calls, spawnProcess } = createSpawn({ code: 0 });
+    const shown = await showToast(
+      createToastAssets(directory),
+      { kind: "completed", sessionId: "s1", title: "t", body: "b" },
+      spawnProcess,
+    );
+    assert.equal(shown, true);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].command, /powershell\.exe$/iu);
+    assert.ok(calls[0].args.includes("-File"));
+    assert.ok(calls[0].args.some((arg) => /payload-/u.test(arg)), "the payload path is passed to the helper");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("showToast resolves false and removes the payload when the helper fails", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dsh-notification-show-"));
+  try {
+    const { spawnProcess } = createSpawn({ code: 2 });
+    const shown = await showToast(
+      createToastAssets(directory),
+      { kind: "confirm", sessionId: "s1", title: "t", body: "b" },
+      spawnProcess,
+    );
+    assert.equal(shown, false);
+    assert.deepEqual(readdirSync(directory).filter((entry) => entry.startsWith("payload-")), []);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("showToast resolves false when the helper cannot start", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dsh-notification-show-"));
+  try {
+    const { spawnProcess } = createSpawn({ error: new Error("spawn ENOENT") });
+    const shown = await showToast(
+      createToastAssets(directory),
+      { kind: "completed", sessionId: "s1", title: "t", body: "b" },
+      spawnProcess,
+    );
+    assert.equal(shown, false);
+    assert.deepEqual(readdirSync(directory).filter((entry) => entry.startsWith("payload-")), []);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("registerProtocol reports success only when every registry write succeeds", () => {
+  const calls = [];
+  const run = (command, args) => {
+    calls.push({ command, args });
+    return { status: 0 };
+  };
+  assert.equal(registerProtocol("C:\\tmp\\dsh\\reveal.vbs", run), true);
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every((call) => call.command === "reg.exe"));
+  assert.equal(registerProtocol("C:\\tmp\\dsh\\reveal.vbs", () => ({ status: 1 })), false);
+});
+
+test("writeSoundIfChanged replaces a stale asset and keeps an identical one", () => {
+  const directory = mkdtempSync(join(tmpdir(), "dsh-notification-wav-"));
+  try {
+    const target = join(directory, "complete.wav");
+    const first = synthesizeWav([{ frequency: 523.25, offset: 0, duration: 0.2, volume: 0.2 }], "sine");
+    writeSoundIfChanged(target, first);
+    assert.equal(existsSync(target), true);
+    const changed = synthesizeWav([{ frequency: 659.25, offset: 0, duration: 0.2, volume: 0.2 }], "triangle");
+    writeSoundIfChanged(target, changed);
+    assert.equal(readFileSync(target).equals(changed), true);
+    writeSoundIfChanged(target, changed);
+    assert.equal(readFileSync(target).equals(changed), true);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

@@ -141,15 +141,17 @@ export function createStatusSource(initial = new Map()) {
 }
 
 /**
- * Session list row stub.
+ * Session list row stub shaped like the client Session list projection:
+ * `{ id, displayTitle, running, retainedBy, parentId?, origin? }`.
  * @param sessionId - Session identity.
  * @param overrides - row fields to override.
  * @returns a row shaped like the client Session list projection.
  */
 export function createRow(sessionId, overrides = {}) {
   return {
-    sessionId,
+    id: sessionId,
     displayTitle: `会话 ${sessionId}`,
+    running: false,
     retainedBy: { mainView: 0 },
     ...overrides,
   };
@@ -173,6 +175,7 @@ export function createWindow(overrides = {}) {
       ...overrides.localStorage,
     },
     setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (handle) => clearTimeout(handle),
     setInterval: () => 0,
     clearInterval: () => {},
     addEventListener() {},

@@ -84,8 +84,9 @@ test("fill replaces only known placeholders", () => {
 
 test("only top-level conversation rows are root sessions", () => {
   assert.equal(isRootSessionRow(createRow("s1")), true);
-  assert.equal(isRootSessionRow(createRow("s1", { parentSessionId: "parent" })), false);
+  assert.equal(isRootSessionRow(createRow("s1", { parentId: "parent" })), false);
   assert.equal(isRootSessionRow(createRow("s1", { origin: "subagent" })), false);
+  assert.equal(isRootSessionRow(createRow("s1", { parentId: "parent", origin: "subagent" })), false);
   assert.equal(isRootSessionRow(undefined), false);
 });
 

@@ -156,7 +156,7 @@ test("subagent Sessions do not emit completion notifications", async () => {
   const plugin = startPlugin({
     rows: {
       main: createRow("main"),
-      child: createRow("child", { parentSessionId: "main", origin: "subagent" }),
+      child: createRow("child", { parentId: "main", origin: "subagent" }),
     },
     initialStatus: new Map([["child", running()]]),
   });
@@ -171,7 +171,7 @@ test("an approval wait inside a subagent Session still notifies", async () => {
   const plugin = startPlugin({
     rows: {
       main: createRow("main"),
-      child: createRow("child", { parentSessionId: "main", origin: "subagent" }),
+      child: createRow("child", { parentId: "main", origin: "subagent" }),
     },
     initialStatus: new Map([["child", running()]]),
   });
@@ -179,6 +179,47 @@ test("an approval wait inside a subagent Session still notifies", async () => {
   await settle();
   assert.equal(plugin.notifications().length, 1);
   assert.equal(plugin.notifications()[0].title, "需要你确认");
+  plugin.dispose();
+});
+
+test("rapid identical completions collapse into one notification", async () => {
+  const plugin = startPlugin({ initialStatus: new Map([["main", running()]]) });
+  plugin.status.set(new Map([["main", { running: false }]]));
+  await settle();
+  plugin.status.set(new Map([["main", running()]]));
+  plugin.status.set(new Map([["main", { running: false }]]));
+  await settle();
+  assert.equal(plugin.notifications().length, 1, "the second completion lands inside the dedupe window");
+  assert.equal(plugin.events().length, 1);
+  plugin.dispose();
+});
+
+test("two Sessions finishing together are spaced instead of stacked", async () => {
+  const plugin = startPlugin({
+    rows: { a: createRow("a"), b: createRow("b") },
+    initialStatus: new Map([["a", running()], ["b", running()]]),
+  });
+  plugin.status.set(new Map([["a", { running: false }], ["b", { running: false }]]));
+  await settle();
+  assert.equal(plugin.notifications().length, 1, "the second notice waits for the dispatch gap");
+  const gap = plugin.bundle.exports.__internals.DISPATCH_GAP_MS;
+  await new Promise((resolve) => setTimeout(resolve, gap + 250));
+  assert.equal(plugin.notifications().length, 2);
+  plugin.dispose();
+});
+
+test("a Host toast that never answers falls back after its timeout", async () => {
+  const plugin = startPlugin();
+  const { requestHostToast } = plugin.bundle.exports.__internals;
+  plugin.window.fetch = () => new Promise(() => {});
+  const started = Date.now();
+  const shown = await requestHostToast(
+    plugin.window,
+    { kind: "completed", sessionId: "main", title: "t", body: "b" },
+    25,
+  );
+  assert.equal(shown, false);
+  assert.ok(Date.now() - started >= 20, "the timeout bounds the round trip");
   plugin.dispose();
 });
 

@@ -6,7 +6,7 @@
  * `ask_user_question` card), with a different synthesized sound for each case.
  * Clicking the notification brings the user back to that exact Session.
  *
- * Four decisions shape this module.
+ * Five decisions shape this module.
  *
  * 1. The attention source is the built-in Session UI store, not a private
  *    polling loop. `ctx.uiSession.sessionStatus` already tracks every Session's
@@ -27,6 +27,11 @@
  * 4. Clicking a notification calls `ctx.uiWorkspace.openSession`, the same
  *    navigation the Session list uses, then focuses the window. A click never
  *    depends on a protocol handler or a second process.
+ * 5. Delivery is queued and deduplicated. One snapshot can carry several
+ *    transitions at once, and spawning one PowerShell process plus one sound for
+ *    every event at the same instant floods the desktop; identical
+ *    `(Session, kind)` notices inside a short window collapse, and later notices
+ *    wait for a quiet gap.
  *
  * Plain JavaScript by design. An installed client bundle receives the Platform
  * Seed's module table from the browser, so no build step is involved;
@@ -84,6 +89,18 @@ window.__ModuleLoader__.load({
 
     /** Longest Session title carried into a notification body. */
     const TITLE_MAX = 64;
+
+    /** Same-Session, same-kind notifications inside this window collapse into one. */
+    const DEDUPE_WINDOW_MS = 5000;
+
+    /** Minimum gap between two deliveries, so a burst queues instead of stacking. */
+    const DISPATCH_GAP_MS = 1200;
+
+    /** Longest pending queue; overflow is dropped instead of delaying every notice. */
+    const QUEUE_MAX = 8;
+
+    /** Renderer round-trip timeout for the Host toast, longer than the Host's own wait. */
+    const TOAST_TIMEOUT_MS = 8000;
 
     /** In-memory ring size for debug/state inspection. */
     const RECORD_MAX = 20;
@@ -200,7 +217,9 @@ window.__ModuleLoader__.load({
      * @returns true for a root Session row.
      */
     function isRootSessionRow(row) {
-      return row !== undefined && row.parentSessionId === undefined && row.origin !== "subagent";
+      if (row === undefined) return false;
+      if (row.origin === "subagent") return false;
+      return row.parentId === undefined;
     }
 
     /**
@@ -478,41 +497,144 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Serialize notification delivery: collapse identical bursts, space the rest.
+     *
+     * One status snapshot can surface several transitions at once (a page boot with
+     * pending interactions, several Sessions finishing together). Spawning one
+     * PowerShell process and one sound per event at the same instant floods the
+     * desktop, so deliveries are queued: the first starts at once, later ones wait
+     * for a quiet gap, and an identical `(Session, kind)` notice inside the dedupe
+     * window is dropped.
+     * @param run - delivers one queued event and returns a promise.
+     * @param timers - clock and timer seam (injectable for tests).
+     * @returns `{ push, dispose }`.
+     */
+    function createDispatcher(run, timers) {
+      const queue = [];
+      const delivered = new Map();
+      let handle;
+      let busy = false;
+      let lastStartedAt = 0;
+      let disposed = false;
+
+      /** Start the next queued notice when the gap has elapsed and nothing is in flight. */
+      function schedule() {
+        if (disposed || busy || handle !== undefined || queue.length === 0) return;
+        const wait = lastStartedAt === 0 ? 0 : lastStartedAt + DISPATCH_GAP_MS - timers.now();
+        if (wait > 0) {
+          handle = timers.setTimeout(() => {
+            handle = undefined;
+            schedule();
+          }, wait);
+          return;
+        }
+        const next = queue.shift();
+        busy = true;
+        lastStartedAt = timers.now();
+        delivered.set(next.key, lastStartedAt);
+        Promise.resolve()
+          .then(() => run(next.event))
+          .catch(() => {})
+          .then(() => {
+            busy = false;
+            schedule();
+          });
+      }
+
+      return {
+        /**
+         * Queue one notice.
+         * @param event - attention event.
+         * @param key - dedupe identity (`kind:sessionId`).
+         * @returns whether the notice was queued.
+         */
+        push(event, key) {
+          if (disposed) return false;
+          const at = timers.now();
+          for (const [seen, when] of delivered) if (at - when >= DEDUPE_WINDOW_MS) delivered.delete(seen);
+          if (delivered.has(key)) return false;
+          if (queue.some((item) => item.key === key)) return false;
+          if (queue.length >= QUEUE_MAX) {
+            console.warn("[dsh-notification] dropping a notification: the queue is full");
+            return false;
+          }
+          queue.push({ event, key });
+          schedule();
+          return true;
+        },
+        /** Drop queued notices and any pending timer. */
+        dispose() {
+          disposed = true;
+          queue.length = 0;
+          if (handle !== undefined) {
+            timers.clearTimeout(handle);
+            handle = undefined;
+          }
+        },
+      };
+    }
+
+    /**
      * Ask the Host half for one real Windows toast. Resolves true only when the
-     * Host reports that its PowerShell toast was spawned; every other outcome
-     * (non-Windows Host, missing plugin route, transport failure) falls back to
-     * the renderer notification path.
+     * Host reports that its PowerShell toast was delivered; every other outcome
+     * (non-Windows Host, missing plugin route, transport failure, toast failure,
+     * timeout) falls back to the renderer notification path.
      * @param win - the browser window.
      * @param payload - `{ kind, sessionId, title, body }`.
+     * @param timeoutMs - round-trip budget; defaults to {@link TOAST_TIMEOUT_MS}.
      * @returns whether the Host accepted the toast.
      */
-    function requestHostToast(win, payload) {
-      try {
-        if (typeof win.fetch !== "function") return Promise.resolve(false);
-        const query = new URLSearchParams({
-          kind: payload.kind,
-          sessionId: payload.sessionId,
-          title: payload.title,
-          body: payload.body,
-        });
-        const result = win.fetch(`${TOAST_PATH}?${query.toString()}`, {
-          method: "GET",
-          keepalive: true,
-          credentials: "same-origin",
-          cache: "no-store",
-        });
-        return Promise.resolve(result)
-          .then((response) => {
-            if (response === undefined || response === null || response.ok !== true) return false;
-            const parsed = typeof response.json === "function" ? response.json() : Promise.resolve({});
-            return Promise.resolve(parsed)
-              .then((data) => data !== null && typeof data === "object" && data.shown === true)
-              .catch(() => false);
-          })
-          .catch(() => false);
-      } catch {
-        return Promise.resolve(false);
-      }
+    function requestHostToast(win, payload, timeoutMs = TOAST_TIMEOUT_MS) {
+      return new Promise((resolve) => {
+        let settled = false;
+        let timer;
+        let controller;
+        const finish = (shown) => {
+          if (settled) return;
+          settled = true;
+          if (timer !== undefined && typeof win.clearTimeout === "function") win.clearTimeout(timer);
+          resolve(shown);
+        };
+        if (typeof win.setTimeout === "function") {
+          timer = win.setTimeout(() => {
+            if (controller !== undefined) {
+              try {
+                controller.abort();
+              } catch {
+                /* already settled */
+              }
+            }
+            finish(false);
+          }, timeoutMs);
+        }
+        try {
+          if (typeof win.fetch !== "function") {
+            finish(false);
+            return;
+          }
+          const query = new URLSearchParams({
+            kind: payload.kind,
+            sessionId: payload.sessionId,
+            title: payload.title,
+            body: payload.body,
+          });
+          controller = typeof win.AbortController === "function" ? new win.AbortController() : undefined;
+          const init = { method: "GET", keepalive: true, credentials: "same-origin", cache: "no-store" };
+          if (controller !== undefined) init.signal = controller.signal;
+          Promise.resolve(win.fetch(`${TOAST_PATH}?${query.toString()}`, init))
+            .then((response) => {
+              if (response === undefined || response === null || response.ok !== true) return false;
+              const parsed = typeof response.json === "function" ? response.json() : Promise.resolve({});
+              return Promise.resolve(parsed)
+                .then((data) => data !== null && typeof data === "object" && data.shown === true)
+                .catch(() => false);
+            })
+            .catch(() => false)
+            .then((shown) => finish(shown));
+        } catch {
+          finish(false);
+        }
+      });
     }
 
     /**
@@ -659,12 +781,22 @@ window.__ModuleLoader__.load({
       const status = ctx.uiSession.sessionStatus;
       const revealState = { revealBusy: false, revealed: 0 };
       let previous = new Map(status.getSnapshot());
+      const dispatcher = createDispatcher(
+        (event) => deliver(ctx, t, audio, records, event),
+        {
+          now: () => Date.now(),
+          setTimeout: (callback, ms) => win.setTimeout(callback, ms),
+          clearTimeout: (handle) => {
+            if (typeof win.clearTimeout === "function") win.clearTimeout(handle);
+          },
+        },
+      );
 
       const unsubscribe = status.subscribe(() => {
         const next = status.getSnapshot();
         const events = collectAttentionEvents(previous, next);
         previous = new Map(next);
-        for (const event of events) deliver(ctx, t, audio, records, event);
+        for (const event of events) dispatcher.push(event, `${event.kind}:${event.sessionId}`);
       });
 
       // A click in a Host toast restores the window through the desktop app's
@@ -718,6 +850,7 @@ window.__ModuleLoader__.load({
 
       return () => {
         unsubscribe();
+        dispatcher.dispose();
         if (poll !== undefined && typeof win.clearInterval === "function") win.clearInterval(poll);
         win.removeEventListener("focus", pollReveal);
         win.removeEventListener("visibilitychange", pollReveal);
@@ -756,6 +889,9 @@ window.__ModuleLoader__.load({
       TOAST_PATH,
       REVEAL_PATH,
       TITLE_MAX,
+      DEDUPE_WINDOW_MS,
+      DISPATCH_GAP_MS,
+      TOAST_TIMEOUT_MS,
       COMPLETION_NOTES,
       CONFIRM_NOTES,
       zh,
@@ -766,6 +902,7 @@ window.__ModuleLoader__.load({
       isRootSessionRow,
       viewingSession,
       createAudioKit,
+      createDispatcher,
       restoreWindow,
       requestHostToast,
       checkReveal,
