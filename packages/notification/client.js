@@ -53,6 +53,22 @@ window.__ModuleLoader__.load({
      */
     const FOCUS_PATH = "api/notification.focus";
 
+    /**
+     * Relative Fetch route the Host half registers to raise a real Windows toast.
+     * HTML5 `Notification` is invisible in the packaged Electron renderer, so the
+     * Host delivers the toast and plays the WAV on Windows.
+     */
+    const TOAST_PATH = "api/notification.toast";
+
+    /**
+     * Relative Fetch route the Host half registers to hand back the Session the
+     * user clicked in a toast. Polled by this half.
+     */
+    const REVEAL_PATH = "api/notification.reveal";
+
+    /** Reveal polling interval; local loopback fetch is cheap. */
+    const REVEAL_POLL_MS = 1500;
+
     /** Minimum gap between two focus requests, so a double click cannot stack app instances. */
     const FOCUS_COOLDOWN_MS = 3000;
 
@@ -393,7 +409,7 @@ window.__ModuleLoader__.load({
       lastFocusAt = now;
       try {
         if (typeof win.fetch !== "function") return;
-        const result = win.fetch(FOCUS_PATH, { method: "POST", keepalive: true, credentials: "same-origin" });
+        const result = win.fetch(FOCUS_PATH, { method: "GET", keepalive: true, credentials: "same-origin", cache: "no-store" });
         if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
       } catch {
         /* focusing is best effort; the Session is already open in the main view */
@@ -462,7 +478,89 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Render and show one attention event as a native notification.
+     * Ask the Host half for one real Windows toast. Resolves true only when the
+     * Host reports that its PowerShell toast was spawned; every other outcome
+     * (non-Windows Host, missing plugin route, transport failure) falls back to
+     * the renderer notification path.
+     * @param win - the browser window.
+     * @param payload - `{ kind, sessionId, title, body }`.
+     * @returns whether the Host accepted the toast.
+     */
+    function requestHostToast(win, payload) {
+      try {
+        if (typeof win.fetch !== "function") return Promise.resolve(false);
+        const query = new URLSearchParams({
+          kind: payload.kind,
+          sessionId: payload.sessionId,
+          title: payload.title,
+          body: payload.body,
+        });
+        const result = win.fetch(`${TOAST_PATH}?${query.toString()}`, {
+          method: "GET",
+          keepalive: true,
+          credentials: "same-origin",
+          cache: "no-store",
+        });
+        return Promise.resolve(result)
+          .then((response) => {
+            if (response === undefined || response === null || response.ok !== true) return false;
+            const parsed = typeof response.json === "function" ? response.json() : Promise.resolve({});
+            return Promise.resolve(parsed)
+              .then((data) => data !== null && typeof data === "object" && data.shown === true)
+              .catch(() => false);
+          })
+          .catch(() => false);
+      } catch {
+        return Promise.resolve(false);
+      }
+    }
+
+    /**
+     * Poll the Host for a toast click and open the Session it names. Called on a
+     * timer and on focus/visibility changes, so a click that restores a hidden
+     * window navigates as soon as the page is visible again.
+     * @param ctx - the browser plugin context.
+     * @param win - the browser window.
+     * @param state - watcher state carrying the in-flight guard and click count.
+     * @returns the poll promise, settled even on transport errors.
+     */
+    function checkReveal(ctx, win, state) {
+      if (state.revealBusy === true) return Promise.resolve();
+      if (win.document !== undefined && win.document !== null && win.document.visibilityState === "hidden") return Promise.resolve();
+      state.revealBusy = true;
+      try {
+        if (typeof win.fetch !== "function") {
+          state.revealBusy = false;
+          return Promise.resolve();
+        }
+        return Promise.resolve(
+          win.fetch(REVEAL_PATH, { method: "GET", credentials: "same-origin", cache: "no-store" }),
+        )
+          .then((response) => {
+            if (response === undefined || response === null || response.ok !== true) return undefined;
+            const parsed = typeof response.json === "function" ? response.json() : Promise.resolve({});
+            return Promise.resolve(parsed).catch(() => ({}));
+          })
+          .then((data) => {
+            if (data === null || typeof data !== "object") return;
+            const sessionId = data.sessionId;
+            if (typeof sessionId !== "string" || sessionId.length === 0) return;
+            state.revealed += 1;
+            openSession(ctx, sessionId);
+          })
+          .catch(() => {})
+          .finally(() => {
+            state.revealBusy = false;
+          });
+      } catch {
+        state.revealBusy = false;
+        return Promise.resolve();
+      }
+    }
+
+    /**
+     * Deliver one attention event: Host toast on Windows, renderer notification
+     * fallback elsewhere. Records exactly one diagnostic entry per event.
      * @param ctx - the browser plugin context.
      * @param t - bound notification translator.
      * @param audio - audio kit.
@@ -481,44 +579,64 @@ window.__ModuleLoader__.load({
       const sessionTitle = sessionTitleOf(ctx, sessionId) ?? t("untitled");
       const title = t(titleKey);
       const body = fill(t(bodyKey), { title: sessionTitle });
-      const sound = event.kind === "completed" ? "completion" : "confirm";
-      const played = audio.play(sound);
-      const NotificationCtor = win.Notification;
-      const canNotify = typeof NotificationCtor === "function" && NotificationCtor.permission === "granted";
-      /** @type {{ kind: string, sessionId: string, title: string, body: string, sound: string, shown: boolean, time: number }} */
-      const record = { kind: event.kind, sessionId, title, body, sound: played ? sound : "system", shown: false, time: Date.now() };
+      const base = { kind: event.kind, sessionId, title, body, shown: false, channel: "none", time: Date.now() };
 
-      if (canNotify) {
-        try {
-          const notification = new NotificationCtor(title, {
-            body,
-            tag: `dsh-notification:${event.kind}:${sessionId}`,
-            silent: played,
-            requireInteraction: false,
-          });
-          notification.onclick = () => {
-            openSession(ctx, sessionId);
-            restoreWindow(win);
-            try {
-              notification.close();
-            } catch {
-              /* already closed */
-            }
-          };
-          notification.onerror = () => {
-            record.shown = false;
-          };
-          record.shown = true;
-        } catch (error) {
-          console.warn("[dsh-notification] the desktop notification could not be shown", error);
+      /**
+       * Finish one delivery.
+       * @param record - final diagnostic record.
+       */
+      const finish = (record) => {
+        records.push(record);
+        if (records.length > RECORD_MAX) records.shift();
+        announce(win, record);
+      };
+
+      /**
+       * Renderer fallback: Web Audio motif plus HTML5 Notification. Used on
+       * macOS/Linux and whenever the Host toast route is unavailable.
+       * @returns the settled record.
+       */
+      const fallback = () => {
+        const sound = event.kind === "completed" ? "completion" : "confirm";
+        const played = audio.play(sound);
+        const NotificationCtor = win.Notification;
+        const canNotify = typeof NotificationCtor === "function" && NotificationCtor.permission === "granted";
+        const record = { ...base, sound: played ? sound : "system", channel: "renderer-notification" };
+        if (canNotify) {
+          try {
+            const notification = new NotificationCtor(title, {
+              body,
+              tag: `dsh-notification:${event.kind}:${sessionId}`,
+              silent: played,
+              requireInteraction: false,
+            });
+            notification.onclick = () => {
+              openSession(ctx, sessionId);
+              restoreWindow(win);
+              try {
+                notification.close();
+              } catch {
+                /* already closed */
+              }
+            };
+            record.shown = true;
+          } catch (error) {
+            console.warn("[dsh-notification] the desktop notification could not be shown", error);
+          }
+        } else {
+          requestPermission(win);
         }
-      } else {
-        requestPermission(win);
-      }
+        finish(record);
+        return record;
+      };
 
-      records.push(record);
-      if (records.length > RECORD_MAX) records.shift();
-      announce(win, record);
+      return requestHostToast(win, { kind: event.kind, sessionId, title, body }).then((toastShown) => {
+        if (toastShown) {
+          finish({ ...base, sound: "host", channel: "host-toast", shown: true });
+          return;
+        }
+        fallback();
+      });
     }
 
     //#endregion
@@ -534,10 +652,12 @@ window.__ModuleLoader__.load({
      * @returns disposer owned by the surrounding effect.
      */
     function startWatcher(ctx) {
+      const win = window;
       const t = ctx.locale.bind(NS);
-      const audio = createAudioKit(window);
+      const audio = createAudioKit(win);
       const records = [];
       const status = ctx.uiSession.sessionStatus;
+      const revealState = { revealBusy: false, revealed: 0 };
       let previous = new Map(status.getSnapshot());
 
       const unsubscribe = status.subscribe(() => {
@@ -547,18 +667,29 @@ window.__ModuleLoader__.load({
         for (const event of events) deliver(ctx, t, audio, records, event);
       });
 
-      requestPermission(window);
+      // A click in a Host toast restores the window through the desktop app's
+      // single-instance handler and writes a reveal file; pick it up as soon as
+      // the page is visible again and on a slow idle poll.
+      const pollReveal = () => {
+        checkReveal(ctx, win, revealState);
+      };
+      const poll = typeof win.setInterval === "function" ? win.setInterval(pollReveal, REVEAL_POLL_MS) : undefined;
+      win.addEventListener("focus", pollReveal);
+      win.addEventListener("visibilitychange", pollReveal);
+
+      requestPermission(win);
       audio.unlock();
 
       let debug;
       try {
-        if (window.localStorage?.getItem(DEBUG_KEY) === "1") {
+        if (win.localStorage?.getItem(DEBUG_KEY) === "1") {
           debug = {
             state: () => ({
-              permission: typeof window.Notification === "function" ? window.Notification.permission : "unavailable",
+              permission: typeof win.Notification === "function" ? win.Notification.permission : "unavailable",
               audio: audio.ready(),
               sessionStatus: [...previous.entries()].map(([sessionId, value]) => ({ sessionId, ...value })),
               notifications: [...records],
+              revealed: revealState.revealed,
             }),
             simulate: (kind, sessionId) => {
               const event = {
@@ -569,8 +700,9 @@ window.__ModuleLoader__.load({
             },
             open: (sessionId) => openSession(ctx, sessionId),
             sounds: () => audio.test(),
+            reveal: () => checkReveal(ctx, win, revealState),
           };
-          window.__dshNotificationDebug = debug;
+          win.__dshNotificationDebug = debug;
         }
       } catch {
         /* a sandboxed storage must not disable the plugin */
@@ -578,19 +710,22 @@ window.__ModuleLoader__.load({
 
       /** Ask for permission and unlock audio on the page's own input activity. */
       function onGesture() {
-        requestPermission(window);
+        requestPermission(win);
         audio.unlock();
       }
-      window.addEventListener("pointerdown", onGesture, { capture: true, passive: true });
-      window.addEventListener("keydown", onGesture, { capture: true });
+      win.addEventListener("pointerdown", onGesture, { capture: true, passive: true });
+      win.addEventListener("keydown", onGesture, { capture: true });
 
       return () => {
         unsubscribe();
-        window.removeEventListener("pointerdown", onGesture, { capture: true });
-        window.removeEventListener("keydown", onGesture, { capture: true });
+        if (poll !== undefined && typeof win.clearInterval === "function") win.clearInterval(poll);
+        win.removeEventListener("focus", pollReveal);
+        win.removeEventListener("visibilitychange", pollReveal);
+        win.removeEventListener("pointerdown", onGesture, { capture: true });
+        win.removeEventListener("keydown", onGesture, { capture: true });
         if (debug !== undefined) {
           try {
-            delete window.__dshNotificationDebug;
+            delete win.__dshNotificationDebug;
           } catch {
             /* readonly window */
           }
@@ -618,6 +753,8 @@ window.__ModuleLoader__.load({
       EVENT_NAME,
       DEBUG_KEY,
       FOCUS_PATH,
+      TOAST_PATH,
+      REVEAL_PATH,
       TITLE_MAX,
       COMPLETION_NOTES,
       CONFIRM_NOTES,
@@ -630,6 +767,8 @@ window.__ModuleLoader__.load({
       viewingSession,
       createAudioKit,
       restoreWindow,
+      requestHostToast,
+      checkReveal,
     };
 
     return { inject, apply, __internals };

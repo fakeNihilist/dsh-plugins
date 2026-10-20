@@ -3,8 +3,8 @@
  *
  * The bundle is plain JavaScript loaded by the Platform Seed, so a test supplies
  * the same surface the browser does: `document`, `Notification`, `AudioContext`,
- * `CustomEvent`, storage, event listeners, and the Session/Workspace services the
- * plugin is injected with. Nothing here reimplements plugin logic.
+ * `CustomEvent`, storage, event listeners, `fetch`, and the Session/Workspace
+ * services the plugin is injected with. Nothing here reimplements plugin logic.
  */
 
 import { loadBundle } from "./load-bundle.js";
@@ -37,7 +37,7 @@ export function createDocument(overrides = {}) {
 /**
  * Notification constructor stub with a per-test instance registry.
  * @param overrides - static permission and permission-request behavior.
- * @returns the constructor, with `instances` and `requestCalls`.
+ * @returns the constructor, with `instances` and `state`.
  */
 export function createNotificationClass(overrides = {}) {
   const instances = [];
@@ -75,6 +75,7 @@ export function createNotificationClass(overrides = {}) {
  */
 export function createAudioContextClass(overrides = {}) {
   const instances = [];
+  const blocked = overrides.blocked === true;
   class FakeAudioContext {
     constructor() {
       this.state = overrides.state ?? "running";
@@ -85,6 +86,7 @@ export function createAudioContextClass(overrides = {}) {
     }
 
     resume() {
+      if (blocked) return Promise.resolve();
       // A real AudioContext transitions asynchronously: the state stays
       // "suspended" until the returned promise settles.
       return Promise.resolve().then(() => {
@@ -154,7 +156,10 @@ export function createRow(sessionId, overrides = {}) {
 }
 
 /**
- * Window stub carrying the globals the bundle reads.
+ * Window stub carrying the globals the bundle reads. The default `fetch`
+ * simulates a Host without the Windows toast route, so the renderer fallback is
+ * the default test path; `startPlugin({ hostToast: true })` swaps in a Host that
+ * accepts toasts and serves reveals.
  * @param overrides - document, notification, audio, and storage replacements.
  * @returns the window stub.
  */
@@ -168,16 +173,25 @@ export function createWindow(overrides = {}) {
       ...overrides.localStorage,
     },
     setTimeout: (callback, ms) => setTimeout(callback, ms),
+    setInterval: () => 0,
+    clearInterval: () => {},
     addEventListener() {},
     removeEventListener() {},
     dispatchEvent(event) {
       window.events.push(event);
       return true;
     },
-    fetch: overrides.fetch ?? ((url, init) => {
-      window.fetchCalls.push({ url, init });
-      return Promise.resolve({ ok: true, status: 204 });
-    }),
+    fetch(url, init) {
+      window.fetchCalls.push({ url: String(url), init });
+      const spec = String(url);
+      if (spec.includes("notification.toast")) {
+        return Promise.resolve({ ok: false, status: 503, json: async () => ({ shown: false }) });
+      }
+      if (spec.includes("notification.reveal")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ sessionId: null }) });
+      }
+      return Promise.resolve({ ok: true, status: 204, json: async () => ({}) });
+    },
     focus() {
       window.focusCalls += 1;
     },
@@ -196,12 +210,26 @@ export function createWindow(overrides = {}) {
 
 /**
  * Evaluate the shipped bundle and start the plugin against a fake browser context.
- * @param options - rows, initial status, locale, window overrides.
+ * @param options - rows, initial status, locale, window overrides, and Host behavior.
  * @returns the running test surface.
  */
 export function startPlugin(options = {}) {
   const rows = options.rows ?? { main: createRow("main") };
   const window = createWindow(options.window);
+  if (options.hostToast === true) {
+    const reveals = [...(options.reveals ?? [])];
+    window.fetch = (url, init) => {
+      window.fetchCalls.push({ url: String(url), init });
+      const spec = String(url);
+      if (spec.includes("notification.toast")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ shown: true, mode: "host-toast" }) });
+      }
+      if (spec.includes("notification.reveal")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ sessionId: reveals.shift() ?? null }) });
+      }
+      return Promise.resolve({ ok: true, status: 204, json: async () => ({}) });
+    };
+  }
   const bundle = loadBundle(window);
   const messages = options.locale === "en" ? bundle.exports.__internals.en : bundle.exports.__internals.zh;
   const translate = (key) => messages[key];
@@ -238,4 +266,14 @@ export function startPlugin(options = {}) {
       for (const dispose of disposers.splice(0)) dispose();
     },
   };
+}
+
+/**
+ * Let queued microtasks and promise chains settle. `deliver` asks the Host for a
+ * toast first, so notification records appear one or two ticks later.
+ * @returns a settled promise.
+ */
+export async function settle() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }

@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | [`browser`](packages/browser) | Host，`browser_*` 工具 | 通过 Playwright 驱动真实 Chromium：打开页面、读取 ARIA 树、点击/输入、截图、处理对话框与下载、录制 WebM。纯 Host 插件，没有客户端 UI。 |
 | [`chat-search`](packages/chat-search) | Host + Web 客户端 | 会话内查找：在会话头部打开查找栏，边输入边高亮已渲染对话中的匹配并逐个跳转，不修改对话 DOM。 |
-| [`notification`](packages/notification) | Host + Web 客户端 | 桌面消息通知：任务完成、等待确认或等待回答时弹出系统通知，两种场景提示音不同，点击通知直接打开对应会话（窗口隐藏时经 `dsh://open` 唤回）。 |
+| [`notification`](packages/notification) | Host + Web 客户端 | Windows 桌面消息通知：任务完成、等待确认或等待回答时弹出系统通知，两种场景提示音不同；点击通知经本机协议回传并打开对应会话（窗口隐藏时同时唤回）。 |
 | [`usage-stats`](packages/usage-stats) | Host + Web 客户端 | 跨全部会话的 Token 用量统计：当日/累计 Token、缓存命中率、一年活动热力图、每日趋势、按模型明细。只读本地会话日志，数据不出本机。 |
 
 ### 环境要求
@@ -176,7 +176,7 @@ Each plugin is an independent DSH profile bundle. They can be installed separate
 | --- | --- | --- |
 | [`browser`](packages/browser) | Host, `browser_*` tools | Drives a real Chromium through Playwright: open pages, read the ARIA tree, click/type, capture screenshots, handle dialogs and downloads, record WebM. Host-only, no client UI. |
 | [`chat-search`](packages/chat-search) | Host + Web client | Find-in-conversation: a find bar in the Session header highlights matches in the rendered transcript and steps through them in place, without mutating the conversation DOM. |
-| [`notification`](packages/notification) | Host + Web client | Desktop notifications: native toasts with distinct sounds when a task finishes or a Session waits for approval or an answer; clicking a toast opens that Session (and restores the window through `dsh://open` when it was hidden). |
+| [`notification`](packages/notification) | Host + Web client | Windows desktop notifications: native toasts when a task finishes or a Session waits for approval or an answer, with distinct sounds; clicking a toast sends that Session back through a local protocol and opens it (restoring a hidden window as well). |
 | [`usage-stats`](packages/usage-stats) | Host + Web client | Whole-corpus token usage: today/cumulative tokens, cache hit rate, a year-long activity heatmap, daily trend, and a per-model breakdown. Read-only from local session logs — nothing leaves the machine. |
 
 ### Requirements
