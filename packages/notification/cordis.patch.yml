@@ -1,0 +1,3 @@
+- insert:
+    - id: notification
+      name: 'dsh-plugin-notification'

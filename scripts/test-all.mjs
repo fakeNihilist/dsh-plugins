@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
-const packages = ['browser', 'chat-search', 'usage-stats'];
+const packages = ['browser', 'chat-search', 'notification', 'usage-stats'];
 const testFilePattern = /\.test\.(?:js|mjs)$/;
 
 function collectTestFiles(dir) {

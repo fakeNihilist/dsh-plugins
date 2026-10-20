@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "A collection of plugins for DeepSeek Harness (DSH): Playwright browser tools, in-session chat search, and whole-corpus token usage statistics.",
+  "description": "A collection of plugins for DeepSeek Harness (DSH): Playwright browser tools, in-session chat search, desktop notifications, and whole-corpus token usage statistics.",
   "license": "MIT",
   "author": "fakeNihilist (https://github.com/fakeNihilist)",
   "homepage": "https://github.com/fakeNihilist/dsh-plugins#readme",
