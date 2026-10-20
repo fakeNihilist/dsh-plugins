@@ -133,6 +133,7 @@ test('the shortcut is captured and routed, and stands down with no conversation'
   /** A keydown record shaped like the DOM event the handler reads. */
   const key = (overrides = {}) => ({
     key: 'f',
+    code: 'KeyF',
     ctrlKey: true,
     metaKey: false,
     altKey: false,
@@ -168,29 +169,35 @@ test('the shortcut is captured and routed, and stands down with no conversation'
     assert.equal(pressed.defaultPrevented, true);
     assert.equal(opened, 1);
 
+    // A non-Latin layout reports the physical key with a localized `key`.
+    const cyrillic = key({ key: 'а' });
+    onKeyDown(cyrillic);
+    assert.equal(cyrillic.defaultPrevented, true);
+    assert.equal(opened, 2);
+
     // Modified presses stay with the browser and the shell.
     for (const ignored of [
-      key({ key: 'g' }),
+      key({ key: 'g', code: 'KeyG' }),
       key({ key: 'F', ctrlKey: false, metaKey: false }),
       key({ altKey: true }),
       key({ key: 'f', ctrlKey: false, metaKey: false }),
     ]) {
       onKeyDown(ignored);
       assert.equal(ignored.defaultPrevented, false);
-      assert.equal(opened, 1);
+      assert.equal(opened, 2);
     }
 
     // An event an earlier handler already consumed is left alone.
     const consumed = key({ defaultPrevented: true });
     onKeyDown(consumed);
     assert.equal(consumed.defaultPrevented, true);
-    assert.equal(opened, 1);
+    assert.equal(opened, 2);
 
     // Command on macOS is the same gesture.
     const mac = key({ ctrlKey: false, metaKey: true });
     onKeyDown(mac);
     assert.equal(mac.defaultPrevented, true);
-    assert.equal(opened, 2);
+    assert.equal(opened, 3);
   } finally {
     exports.__internals.registry.clear();
   }

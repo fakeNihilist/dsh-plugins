@@ -174,10 +174,17 @@ test('activating the plugin injects the stylesheet and the shortcut', (t) => {
     ]);
     assert.equal(stage.activation.record.locales[0].ns, 'chatSearch');
 
-    // Ctrl+F opens the bar in the resident conversation.
+    // Ctrl+F opens the bar in the resident conversation; a non-Latin layout
+    // reports `key: 'а'` while the physical key stays `KeyF`.
     act(() => {
       document.dispatchEvent(
-        new window.KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true }),
+        new window.KeyboardEvent('keydown', {
+          key: 'а',
+          code: 'KeyF',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
       );
     });
     assert.ok(stage.bar() !== null, 'the shortcut must open the find bar');

@@ -1291,7 +1291,9 @@ window.__ModuleLoader__.load({
         /** Route Ctrl/Cmd+F to whichever resident conversation is being read. */
         const onKeyDown = (event) => {
           if (event.defaultPrevented) return;
-          if (event.key !== "f" && event.key !== "F") return;
+          // Match the physical key so non-Latin layouts keep the shortcut; the letter
+          // fallback keeps remapped layouts (for example Dvorak) working.
+          if (event.code !== "KeyF" && event.key !== "f" && event.key !== "F") return;
           if (event.ctrlKey !== true && event.metaKey !== true) return;
           if (event.altKey === true) return;
           const target = pickSearchTarget();
