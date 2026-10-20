@@ -1,0 +1,51 @@
+{
+  "name": "@local/dsh-plugin-browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Host-side Playwright browser tools for DeepSeek Harness: open, inspect, interact, capture, download, dialogs, and record.",
+  "license": "MIT",
+  "author": "fakeNihilist (https://github.com/fakeNihilist)",
+  "homepage": "https://github.com/fakeNihilist/dsh-plugins/tree/main/packages/browser#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fakeNihilist/dsh-plugins.git",
+    "directory": "packages/browser"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis-plugin",
+    "browser",
+    "playwright",
+    "chromium",
+    "automation",
+    "agent-tools"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./src/*": "./src/*"
+  },
+  "files": [
+    "index.js",
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "install.ps1"
+  ],
+  "scripts": {
+    "test": "node --test test/policy.test.mjs test/target.test.mjs test/format.test.mjs",
+    "test:contract": "node --preserve-symlinks --preserve-symlinks-main --test test/plugin.test.mjs test/cordis.test.mjs test/host-schema.test.mjs test/tools.test.mjs",
+    "smoke": "node test/smoke.mjs",
+    "install:desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Profile desktop"
+  },
+  "dependencies": {
+    "playwright-core": "1.59.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

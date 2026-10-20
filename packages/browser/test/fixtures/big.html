@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Big fixture</title></head>
+<body>
+  <h1>Big fixture</h1>
+  <div id="content"></div>
+  <script>
+    const content = document.getElementById('content')
+    const fragment = document.createDocumentFragment()
+    for (let index = 0; index < 800; index += 1) {
+      const paragraph = document.createElement('p')
+      paragraph.textContent = `Paragraph ${index + 1}: the quick brown fox jumps over the lazy dog.`
+      fragment.append(paragraph)
+    }
+    content.append(fragment)
+  </script>
+</body>
+</html>

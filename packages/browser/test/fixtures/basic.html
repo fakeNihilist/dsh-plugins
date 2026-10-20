@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Browser fixture</title></head>
+<body>
+  <h1>Browser fixture</h1>
+  <p id="intro">A page for exercising the browser tools.</p>
+  <button id="increment" aria-label="Increment counter">Increment</button>
+  <output id="count">0</output>
+  <form id="form" onsubmit="event.preventDefault(); document.getElementById('submitted').textContent = document.getElementById('name').value">
+    <label for="name">Name</label>
+    <input id="name" name="name" placeholder="Your name">
+    <label for="color">Color</label>
+    <select id="color" name="color">
+      <option value="red">Red</option>
+      <option value="green">Green</option>
+      <option value="blue">Blue</option>
+    </select>
+    <label><input id="agree" type="checkbox" name="agree"> Agree</label>
+    <button id="submit" type="submit">Submit</button>
+  </form>
+  <p id="submitted"></p>
+  <a id="next" href="/frames.html">Next page</a>
+  <div id="shadow-host"></div>
+  <script>
+    let count = 0
+    document.getElementById('increment').addEventListener('click', () => {
+      count += 1
+      document.getElementById('count').textContent = String(count)
+    })
+    const root = document.getElementById('shadow-host').attachShadow({ mode: 'open' })
+    root.innerHTML = '<button id="shadow-action">Shadow action</button>'
+  </script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Dialog fixture</title></head>
+<body>
+  <h1>Dialog fixture</h1>
+  <button id="alert" onclick="alert('hello alert')">Alert</button>
+  <button id="confirm" onclick="document.getElementById('result').textContent = String(confirm('are you sure'))">Confirm</button>
+  <button id="prompt" onclick="document.getElementById('result').textContent = String(prompt('your name', 'Ada'))">Prompt</button>
+  <p id="result">no result</p>
+</body>
+</html>
