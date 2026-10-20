@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-notification",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Desktop notifications for DeepSeek Harness: a distinct sound when a task finishes and when a Session is waiting for approval or an answer, with click-to-open Session navigation.",

@@ -28,7 +28,7 @@
 ### 点击链路
 
 1. Toast 的启动参数是私有协议 `dsh-notify://reveal/<sessionId>`；
-2. 插件在 `HKCU\Software\Classes\dsh-notify` 注册协议处理脚本 `reveal.ps1`；
+2. 插件在 `HKCU\Software\Classes\dsh-notify` 注册协议处理脚本 `reveal.vbs`（由 GUI 子系统的 `wscript.exe` 运行，**不会闪出控制台黑框**）；
 3. 点击后脚本把 sessionId 写入 `<DSH_HOME>/notification/reveal.json`，并调用 `dsh://open` 唤回桌面窗口；
 4. 页面轮询 `GET /api/notification.reveal`，拿到 sessionId 后打开对应会话。
 
@@ -50,7 +50,7 @@
 启用后会在本机写入：
 
 - `HKCU\Software\Classes\dsh-notify`（Toast 点击激活用的 URL 协议，指向下面的脚本）；
-- `<DSH_HOME>/notification/`：`toast.ps1`、`reveal.ps1`、`complete.wav`、`confirm.wav`、运行时的 `reveal.json` / `payload-*.json`。
+- `<DSH_HOME>/notification/`：`toast.ps1`、`reveal.vbs`、`complete.wav`、`confirm.wav`，以及运行时的 `reveal.json`、`reveal.log`、`payload-*.json`。
 
 以上都是本机文件与单个 HKCU 键，不发网络请求；卸载插件后可手动删除这些残留（注册表键可按 `reg delete "HKCU\Software\Classes\dsh-notify" /f` 删除）。
 
@@ -80,7 +80,7 @@ window.__dshNotificationDebug.open('<sessionId>');
 window.__dshNotificationDebug.sounds();  // 仅调试用：播放渲染端合成的两段音
 ```
 
-每次注意力变化也会在页面上派发 `dsh-notification` 事件，detail 里包含 `kind`、`sessionId`、`title`、`body`、`channel`（`host-toast` 或 `renderer-notification`）、`shown`、`time`。
+每次注意力变化也会在页面上派发 `dsh-notification` 事件，detail 里包含 `kind`、`sessionId`、`title`、`body`、`channel`（`host-toast` 或 `renderer-notification`）、`shown`、`time`。若点击 Toast 后没有跳转，可查看 `<DSH_HOME>/notification/reveal.log`，确认协议处理脚本是否被调用。
 
 ### 实现说明
 
@@ -136,7 +136,7 @@ In the packaged Electron app, HTML5 `Notification` objects created by the render
 ### Click chain
 
 1. the toast's launch argument is the private `dsh-notify://reveal/<sessionId>`;
-2. the plugin registers that protocol under `HKCU\Software\Classes\dsh-notify`, pointing at `reveal.ps1`;
+2. the plugin registers that protocol under `HKCU\Software\Classes\dsh-notify`, pointing at `reveal.vbs` (run by the GUI-subsystem `wscript.exe`, so **no console window flashes** on click);
 3. the handler writes the Session id to `<DSH_HOME>/notification/reveal.json` and launches `dsh://open` to restore the desktop window;
 4. the page polls `GET /api/notification.reveal` and opens that Session.
 
@@ -158,7 +158,7 @@ A standard DSH profile bundle; follow the repository README. Installing through 
 Enabling the plugin writes:
 
 - `HKCU\Software\Classes\dsh-notify` (the toast activation protocol, pointing at the helper script);
-- `<DSH_HOME>/notification/`: `toast.ps1`, `reveal.ps1`, `complete.wav`, `confirm.wav`, plus transient `reveal.json` / `payload-*.json`.
+- `<DSH_HOME>/notification/`: `toast.ps1`, `reveal.vbs`, `complete.wav`, `confirm.wav`, plus transient `reveal.json`, `reveal.log`, and `payload-*.json`.
 
 Everything stays local with no network requests. Removing the plugin leaves those files and key behind; delete them manually (`reg delete "HKCU\Software\Classes\dsh-notify" /f`) if desired.
 

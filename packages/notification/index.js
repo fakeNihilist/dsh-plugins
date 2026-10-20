@@ -125,18 +125,55 @@ if ($json.sound -and (Test-Path -LiteralPath ([string]$json.sound))) {
 Remove-Item -LiteralPath $PayloadPath -Force -ErrorAction SilentlyContinue
 `;
 
-/** `reveal.ps1`: toast activation handler; record the Session and restore the app. */
-const REVEAL_SCRIPT = String.raw`param([string]$Url)
-$ErrorActionPreference = 'SilentlyContinue'
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
-if ($Url -match '^dsh-notify://reveal/(.+)$') {
-  $sessionId = [uri]::UnescapeDataString($Matches[1])
-  $target = Join-Path $here 'reveal.json'
-  $staging = Join-Path $here ('reveal.' + [guid]::NewGuid().ToString('N') + '.tmp')
-  [IO.File]::WriteAllText($staging, $sessionId, [Text.UTF8Encoding]::new($false))
-  Move-Item -LiteralPath $staging -Destination $target -Force
-}
-Start-Process 'dsh://open'
+/**
+ * `reveal.vbs`: toast activation handler; record the Session and restore the app.
+ *
+ * A `.vbs` run by `wscript.exe` is a GUI-subsystem mechanism: Windows never
+ * creates a console window for it. Launching `powershell.exe` from the protocol
+ * key would flash (or leave) a black console window even with `-WindowStyle
+ * Hidden`, which is exactly the artifact this handler must avoid.
+ */
+const REVEAL_SCRIPT = String.raw`Option Explicit
+On Error Resume Next
+Dim url, here, id, target, staging, stream, shell, fso
+url = WScript.Arguments(0)
+Set fso = CreateObject("Scripting.FileSystemObject")
+here = fso.GetParentFolderName(WScript.ScriptFullName)
+Dim logFile
+Set logFile = fso.OpenTextFile(here & "\reveal.log", 8, True)
+logFile.WriteLine Now & " " & url
+logFile.Close
+If InStr(1, url, "dsh-notify://reveal/", vbTextCompare) = 1 Then
+  id = Mid(url, Len("dsh-notify://reveal/") + 1)
+  id = UrlDecode(id)
+  target = here & "\reveal.json"
+  staging = here & "\reveal." & Replace(fso.GetTempName(), ".", "") & ".tmp"
+  Set stream = CreateObject("ADODB.Stream")
+  stream.Type = 2
+  stream.Charset = "utf-8"
+  stream.Open
+  stream.WriteText id
+  stream.SaveToFile staging, 2
+  stream.Close
+  fso.DeleteFile target, True
+  fso.MoveFile staging, target
+End If
+Set shell = CreateObject("WScript.Shell")
+shell.Run "dsh://open", 0, False
+
+Function UrlDecode(value)
+  Dim index, code, result
+  result = value
+  index = 1
+  Do While index <= Len(result) - 2
+    If Mid(result, index, 1) = "%" Then
+      code = Mid(result, index + 1, 2)
+      result = Left(result, index - 1) & Chr(CLng("&H" & code)) & Mid(result, index + 3)
+    End If
+    index = index + 1
+  Loop
+  UrlDecode = result
+End Function
 `;
 
 /**
@@ -208,13 +245,27 @@ export function prepareAssets() {
   if (process.platform !== 'win32') return undefined;
   const directory = notificationDir();
   const toastScript = join(directory, 'toast.ps1');
-  const revealScript = join(directory, 'reveal.ps1');
+  const revealScript = join(directory, 'reveal.vbs');
+  const legacyRevealScript = join(directory, 'reveal.ps1');
   const completionSound = join(directory, SOUND_FILES.completed);
   const confirmSound = join(directory, SOUND_FILES.confirm);
   try {
     mkdirSync(directory, { recursive: true });
     writeFileSync(toastScript, TOAST_SCRIPT, 'utf8');
     writeFileSync(revealScript, REVEAL_SCRIPT, 'utf8');
+    // Older builds registered a PowerShell activation handler; it flashed a
+    // console window on click, so remove both the script and stale artifacts.
+    try {
+      rmSync(legacyRevealScript, { force: true });
+    } catch {
+      /* another process may be reading it */
+    }
+    // Fresh activation log per Host boot; it only records protocol invocations.
+    try {
+      rmSync(join(directory, 'reveal.log'), { force: true });
+    } catch {
+      /* ignore */
+    }
     if (!existsSync(completionSound)) writeFileSync(completionSound, synthesizeWav(COMPLETION_NOTES, 'sine'));
     if (!existsSync(confirmSound)) writeFileSync(confirmSound, synthesizeWav(CONFIRM_NOTES, 'triangle'));
     for (const entry of readdirSafe(directory)) {
@@ -249,10 +300,15 @@ function readdirSafe(directory) {
 /**
  * Register the private protocol under HKCU. Idempotent; `reg.exe` overwrites the
  * command key on every activation so upgrades keep working.
+ *
+ * The handler is `wscript.exe` (GUI subsystem, no console window) rather than a
+ * console host such as PowerShell or cmd, so clicking a toast never flashes a
+ * black box. `//nologo` suppresses the banner; the script itself runs hidden.
  * @param revealScript - absolute path of the activation handler.
  */
 export function registerProtocol(revealScript) {
-  const command = `"${powershellPath()}" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${revealScript}" "%1"`;
+  const wscript = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'wscript.exe');
+  const command = `"${wscript}" //nologo "${revealScript}" "%1"`;
   const keys = [
     ['HKCU\\Software\\Classes\\dsh-notify', ['/ve', '/d', 'URL:DSH Notification', '/f']],
     ['HKCU\\Software\\Classes\\dsh-notify', ['/v', 'URL Protocol', '/d', '', '/f']],
