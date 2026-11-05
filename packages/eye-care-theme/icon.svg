@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Eye-care dark theme">
+  <rect width="64" height="64" rx="15" fill="#171b16"/>
+  <path d="M8.5 32.5C15.5 21.8 23.6 16.5 32 16.5s16.5 5.3 23.5 16c-7 10.7-15.1 16-23.5 16S15.5 43.2 8.5 32.5Z" fill="none" stroke="#ded8c4" stroke-width="3.2" stroke-linejoin="round"/>
+  <circle cx="32" cy="32.5" r="9.6" fill="#7fae8f"/>
+  <circle cx="32" cy="32.5" r="4.4" fill="#171b16"/>
+  <circle cx="29.2" cy="29.7" r="1.7" fill="#f4f2e7"/>
+</svg>

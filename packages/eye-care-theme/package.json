@@ -1,0 +1,57 @@
+{
+  "name": "dsh-plugin-eye-care-theme",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Eye-care theme for the DeepSeek Harness Web GUI: a warm, low-blue-light dark palette (moss-tinted surfaces with soft cream text) applied as a theme-token override layer, with a matching warm light palette.",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis-plugin",
+    "theme",
+    "dark-theme",
+    "eye-care",
+    "eye-protection",
+    "low-blue-light",
+    "color-tokens"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fakeNihilist/dsh-plugins.git",
+    "directory": "packages/eye-care-theme"
+  },
+  "homepage": "https://github.com/fakeNihilist/dsh-plugins/tree/main/packages/eye-care-theme#readme",
+  "author": "fakeNihilist",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-theme"
+      ]
+    }
+  }
+}
