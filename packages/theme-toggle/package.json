@@ -1,0 +1,58 @@
+{
+  "name": "dsh-plugin-theme-toggle",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "One-click light/dark switch for the DeepSeek Harness Web GUI: a follow-the-theme button at the sidebar foot that flips the saved theme preference between light and dark, localized in Chinese and English.",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis-plugin",
+    "theme",
+    "dark-mode",
+    "light-mode",
+    "toggle",
+    "sidebar"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fakeNihilist/dsh-plugins.git",
+    "directory": "packages/theme-toggle"
+  },
+  "homepage": "https://github.com/fakeNihilist/dsh-plugins/tree/main/packages/theme-toggle#readme",
+  "author": "fakeNihilist",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-theme",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  }
+}

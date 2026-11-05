@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Theme Toggle",
+    "description": "A one-click light/dark switch at the sidebar foot: flips the saved theme preference and follows the active theme with its own colors."
+  }
+}

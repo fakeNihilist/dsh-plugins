@@ -1,0 +1,3 @@
+- insert:
+    - id: theme-toggle
+      name: 'dsh-plugin-theme-toggle'
